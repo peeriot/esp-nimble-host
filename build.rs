@@ -1,15 +1,21 @@
-use std::path::Path;
+use std::{env, path::Path};
 use walkdir::WalkDir;
 
 fn main() {
     // Build paths
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut repo_root = manifest_dir.to_path_buf();
-    repo_root.pop();
+    // repo_root.pop();
     let nimble_dir = repo_root.join("vendor/apache-nimble");
     if !nimble_dir.exists() {
-        panic!("Couldn't find NimBLE in 'vendor/apache-nimble'. Did you update the git submodule?");
+        panic!(
+            "Couldn't find NimBLE in 'vendor/apache-nimble'. Did you update the git submodule? {}",
+            nimble_dir.display()
+        );
     }
+
+    let sysroot = env::var("RISCV_SYSROOT")
+        .expect("Set RISCV_SYSROOT to your cross toolchain sysroot (from *-gcc -print-sysroot)");
 
     // Rerun if local impl changed
     println!(
@@ -46,6 +52,13 @@ fn main() {
             true
         });
 
+    let clang_common = [
+        format!("--sysroot={sysroot}"),
+        // one of these usually exists depending on toolchain layout:
+        format!("-isystem{sysroot}/include"),
+        format!("-isystem{sysroot}/usr/include"),
+    ];
+
     // use bindgen to generate bindings from the header
     let bindings = bindgen::Builder::default()
         .headers(headers)
@@ -54,6 +67,7 @@ fn main() {
                 .iter()
                 .map(|dir| format!("-I{}", dir.display())),
         )
+        .clang_args(clang_common)
         .clang_arg("-DBLE_NPL_LOG_MODULE=BLE_HS_LOG")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new())) // this adds rerun hooks for cargo
         .use_core() // to make bindgen not use std types
@@ -138,6 +152,9 @@ fn main() {
         // You can keep your noise suppression if you want
         .flag("-Wno-unused-parameter")
         .flag("-Wno-unused-variable")
+        .flag(&format!("--sysroot={sysroot}"))
+        .flag(&format!("-isystem{sysroot}/include"))
+        .flag(&format!("-isystem{sysroot}/usr/include"))
         .compile("apache_nimble_host");
 
     println!("cargo:rustc-link-lib=static=apache_nimble_host"); // link the static library to the final binary
