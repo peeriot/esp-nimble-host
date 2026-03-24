@@ -8,10 +8,15 @@ pub mod nimble_port;
 use thiserror::Error;
 
 pub mod bindings {
-    #![allow(non_camel_case_types)]
-    #![allow(non_upper_case_globals)]
-    #![allow(non_snake_case)]
-    #![allow(unsafe_op_in_unsafe_fn)]
+    #![allow(
+        non_camel_case_types,
+        non_upper_case_globals,
+        non_snake_case,
+        unsafe_op_in_unsafe_fn,
+        unused,
+        dead_code,
+        clippy::all
+    )]
 
     include!(concat!(env!("OUT_DIR"), "/nimble_host_bindings.rs"));
 }

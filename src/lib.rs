@@ -48,7 +48,7 @@ use embassy_sync::{
     pubsub::{PubSubChannel, Subscriber},
     signal::Signal,
 };
-use esp_radio::asynch::AtomicWaker;
+use embassy_sync::waitqueue::AtomicWaker;
 use esp_radio::ble::controller::BleConnector;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
 
