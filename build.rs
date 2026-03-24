@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -54,12 +55,66 @@ fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
     nimble_dir
 }
 
+/// Patch NimBLE's `os_memblock_get` to zero returned memory pool blocks.
+///
+/// # Why this is needed
+///
+/// NimBLE's memory pool (`os_mempool`) reuses freed blocks by threading a
+/// free-list pointer through the first `sizeof(void *)` bytes of each block.
+/// When a block is re-allocated via `os_memblock_get`, those bytes still
+/// contain the stale free-list pointer — the pool never zeroes them.
+///
+/// The esp-radio BLE NPL (NimBLE Porting Layer) stores a heap-allocated
+/// `Event` pointer inside `ble_npl_event.dummy` (the only field — 4 bytes).
+/// `ble_npl_event_init` skips allocation when `dummy != 0`, assuming the
+/// event is already initialised. A recycled pool block therefore looks
+/// "already initialised" and the stale free-list pointer is later
+/// dereferenced as a function pointer → **Illegal Instruction** crash.
+///
+/// Zeroing each block on allocation makes `dummy == 0` so that
+/// `ble_npl_event_init` allocates a fresh `Event` every time, which is the
+/// correct behaviour. The performance cost is negligible (blocks are tiny,
+/// typically 4–16 bytes).
+fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
+    let file = nimble_dir.join("porting/nimble/src/os_mempool.c");
+    let src = fs::read_to_string(&file).expect("Failed to read os_mempool.c");
+
+    // The original code in os_memblock_get:
+    //     if (block) {
+    //         os_mempool_poison_check(mp, block);
+    //         os_mempool_guard_check(mp, block);
+    //     }
+    //
+    // We add a memset right after the guard checks, before the block is
+    // returned to the caller.
+    let needle = "        if (block) {\n            os_mempool_poison_check(mp, block);\n            os_mempool_guard_check(mp, block);\n        }";
+
+    let replacement = "        if (block) {\n            os_mempool_poison_check(mp, block);\n            os_mempool_guard_check(mp, block);\n            /* [esp-nimble-host patch] Zero block so that ble_npl_event.dummy\n             * is 0 after re-allocation from the pool.  See build.rs for the\n             * full rationale (stale free-list pointers vs. ble_npl_event_init). */\n            memset(block, 0, mp->mp_block_size);\n        }";
+
+    if !src.contains(needle) {
+        if src.contains("[esp-nimble-host patch]") {
+            // Already patched in a previous build.
+            return;
+        }
+        panic!(
+            "Could not find the expected code pattern in os_mempool.c to apply \
+             the zero-on-alloc patch. The NimBLE version may have changed."
+        );
+    }
+
+    let patched = src.replace(needle, replacement);
+    fs::write(&file, patched).expect("Failed to write patched os_mempool.c");
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     // Download NimBLE source (cached in OUT_DIR between incremental builds).
     let nimble_dir = ensure_nimble_source(&out_dir);
+
+    // Patch os_memblock_get to zero returned blocks (see doc comment for rationale).
+    patch_os_mempool_zero_on_alloc(&nimble_dir);
 
     // Local stub/override headers shipped with this crate.
     let stubs_dir = manifest_dir.join("nimble");
