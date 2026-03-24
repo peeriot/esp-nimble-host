@@ -1,3 +1,0 @@
-[submodule "vendor/apache-nimble"]
-	path = vendor/apache-nimble
-	url = https://github.com/apache/mynewt-nimble.git
