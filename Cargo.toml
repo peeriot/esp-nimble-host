@@ -11,10 +11,9 @@ esp32c3 = ["esp-radio/esp32c3"]
 esp32c6 = ["esp-radio/esp32c6"]
 
 [dependencies]
-#esp-radio              = { git = "ssh://git@github.com/esp-rs/esp-hal.git", branch = "main", features = ["export-npl"] }
-#esp-radio              = { path = "../esp-hal/esp-radio", features = ["export-npl"] }
-esp-radio              = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/nimble-host", features = ["export-npl", "log-04"] }
-esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/nimble-host" }
+#esp-radio              = { git = "ssh://git@github.com/esp-rs/esp-hal.git", branch = "main", features = ["ble-host-npl"] }
+esp-radio              = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = ["ble-host-npl", "log-04"] }
+esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream" }
 embassy-sync           = "0.7.2"
 embassy-futures = "0.1.2"
 log = "0.4.29"

@@ -48,8 +48,8 @@ use embassy_sync::{
     pubsub::{PubSubChannel, Subscriber},
     signal::Signal,
 };
-use esp_hal::asynch::AtomicWaker;
-use esp_radio::ble::controller::{BleConnector, HciReadyEventFuture};
+use esp_radio::asynch::AtomicWaker;
+use esp_radio::ble::controller::BleConnector;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Flag that gates the use of the host API only after it came in sync with the controller
@@ -332,131 +332,126 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
     let mut buf = [0; 512];
     loop {
         log::trace!("[C2H] waiting for HCI ready");
-        HciReadyEventFuture.await;
-        log::trace!("[C2H] HCI event ready");
-        loop {
-            let read = ble_host.controller.next(&mut buf).unwrap();
+        let read = ble_host.controller.read_async(&mut buf).await.unwrap();
 
-            if read == 0 {
-                log::trace!("[C2H] ready fired but next() returned 0; returning to select");
-                break;
-            }
+        if read == 0 {
+            continue;
+        }
 
-            let packet_bytes = &buf[..read];
+        let packet_bytes = &buf[..read];
 
-            log::trace!("[C2H] Incoming packet {:02x?}", &packet_bytes);
+        log::trace!("[C2H] Incoming packet {:02x?}", &packet_bytes);
 
-            #[repr(u8)]
-            #[derive(Debug, Default, num_enum::FromPrimitive)]
-            enum PacketType {
-                #[default]
-                Invalid = 0xff,
-                Acl = 0x02,
-                Event = 0x04,
-            }
+        #[repr(u8)]
+        #[derive(Debug, Default, num_enum::FromPrimitive)]
+        enum PacketType {
+            #[default]
+            Invalid = 0xff,
+            Acl = 0x02,
+            Event = 0x04,
+        }
 
-            let packet_type = PacketType::from(packet_bytes[0]);
+        let packet_type = PacketType::from(packet_bytes[0]);
 
-            match packet_type {
-                PacketType::Acl => {
-                    // H4 ACL header: type(1) + handle(2) + len(2)
-                    if packet_bytes.len() < 1 + 2 + 2 {
-                        panic!("short ACL packet");
+        match packet_type {
+            PacketType::Acl => {
+                // H4 ACL header: type(1) + handle(2) + len(2)
+                if packet_bytes.len() < 1 + 2 + 2 {
+                    panic!("short ACL packet");
+                }
+
+                let data_len = u16::from_le_bytes([packet_bytes[3], packet_bytes[4]]) as usize;
+                let expected = 1 + 2 + 2 + data_len;
+                if packet_bytes.len() < expected {
+                    panic!(
+                        "truncated ACL packet: got {}, expected {}",
+                        packet_bytes.len(),
+                        expected
+                    );
+                }
+
+                // Build buffer with 4-byte HCI ACL header + payload
+                let mut hdr = [0u8; 4];
+                hdr[0..2].copy_from_slice(&packet_bytes[1..3]);
+                hdr[2..4].copy_from_slice(&packet_bytes[3..5]);
+
+                // Allocate an mbuf with pkthdr
+                let om = loop {
+                    let om = unsafe { os_msys_get_pkthdr(0, 0) };
+                    if om.is_null() {
+                        yield_now().await;
+                        continue;
                     }
+                    break om;
+                };
 
-                    let data_len = u16::from_le_bytes([packet_bytes[3], packet_bytes[4]]) as usize;
-                    let expected = 1 + 2 + 2 + data_len;
-                    if packet_bytes.len() < expected {
-                        panic!(
-                            "truncated ACL packet: got {}, expected {}",
-                            packet_bytes.len(),
-                            expected
-                        );
-                    }
+                // Append HCI ACL header and payload
+                let rc = unsafe { os_mbuf_append(om, hdr.as_ptr().cast(), hdr.len() as u16) };
+                if rc != 0 {
+                    unsafe { os_mbuf_free_chain(om) };
+                    panic!("os_mbuf_append hdr failed");
+                }
 
-                    // Build buffer with 4-byte HCI ACL header + payload
-                    let mut hdr = [0u8; 4];
-                    hdr[0..2].copy_from_slice(&packet_bytes[1..3]);
-                    hdr[2..4].copy_from_slice(&packet_bytes[3..5]);
+                let payload = &packet_bytes[5..5 + data_len];
+                let rc = unsafe {
+                    os_mbuf_append(om, payload.as_ptr().cast(), payload.len() as u16)
+                };
+                if rc != 0 {
+                    unsafe { os_mbuf_free_chain(om) };
+                    panic!("os_mbuf_append payload failed");
+                }
 
-                    // Allocate an mbuf with pkthdr
-                    let om = loop {
-                        let om = unsafe { os_msys_get_pkthdr(0, 0) };
-                        if om.is_null() {
+                // Deliver to host
+                let rc = unsafe { ble_transport_to_hs_acl_impl(om) };
+                if rc != 0 {
+                    unsafe { os_mbuf_free_chain(om) };
+                    panic!("ble_transport_to_hs_acl_impl failed");
+                }
+            }
+            PacketType::Event => {
+                const PAYLOAD_OFFSET: usize = 3;
+                let payload_len = packet_bytes[2] as usize;
+
+                // First of all let's make sure that we have enough space for our data, by checking
+                // against NimBLE's config
+                if payload_len > MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE as usize - 2 {
+                    panic!(
+                        "Event data too long. MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE={}, payload_len={}",
+                        MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE, payload_len
+                    );
+                }
+
+                // Try to allocate memory for the event
+                let hci_ev = loop {
+                    unsafe {
+                        // TODO: Make safe wrapper in nimble_sys/transport
+                        let ev = ble_transport_alloc_evt(0);
+                        if ev.is_null() {
                             yield_now().await;
-                            continue;
+                        } else {
+                            break ev as *mut ble_hci_ev;
                         }
-                        break om;
                     };
+                };
 
-                    // Append HCI ACL header and payload
-                    let rc = unsafe { os_mbuf_append(om, hdr.as_ptr().cast(), hdr.len() as u16) };
-                    if rc != 0 {
-                        unsafe { os_mbuf_free_chain(om) };
-                        panic!("os_mbuf_append hdr failed");
-                    }
+                unsafe {
+                    (*hci_ev).opcode = packet_bytes[1];
+                    (*hci_ev).length = payload_len as u8;
+                    (*hci_ev)
+                        .data
+                        .as_mut_slice(payload_len)
+                        .copy_from_slice(&packet_bytes[PAYLOAD_OFFSET..]);
+                }
 
-                    let payload = &packet_bytes[5..5 + data_len];
-                    let rc = unsafe {
-                        os_mbuf_append(om, payload.as_ptr().cast(), payload.len() as u16)
-                    };
-                    if rc != 0 {
-                        unsafe { os_mbuf_free_chain(om) };
-                        panic!("os_mbuf_append payload failed");
-                    }
-
-                    // Deliver to host
-                    let rc = unsafe { ble_transport_to_hs_acl_impl(om) };
-                    if rc != 0 {
-                        unsafe { os_mbuf_free_chain(om) };
-                        panic!("ble_transport_to_hs_acl_impl failed");
+                unsafe {
+                    if ble_transport_to_hs_evt_impl(hci_ev as *mut c_void) != 0 {
+                        ble_transport_free(hci_ev as *mut _);
+                        panic!("Failed to send event to Host");
                     }
                 }
-                PacketType::Event => {
-                    const PAYLOAD_OFFSET: usize = 3;
-                    let payload_len = packet_bytes[2] as usize;
-
-                    // First of all let's make sure that we have enough space for our data, by checking
-                    // against NimBLE's config
-                    if payload_len > MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE as usize - 2 {
-                        panic!(
-                            "Event data too long. MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE={}, payload_len={}",
-                            MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE, payload_len
-                        );
-                    }
-
-                    // Try to allocate memory for the event
-                    let hci_ev = loop {
-                        unsafe {
-                            // TODO: Make safe wrapper in nimble_sys/transport
-                            let ev = ble_transport_alloc_evt(0);
-                            if ev.is_null() {
-                                yield_now().await;
-                            } else {
-                                break ev as *mut ble_hci_ev;
-                            }
-                        };
-                    };
-
-                    unsafe {
-                        (*hci_ev).opcode = packet_bytes[1];
-                        (*hci_ev).length = payload_len as u8;
-                        (*hci_ev)
-                            .data
-                            .as_mut_slice(payload_len)
-                            .copy_from_slice(&packet_bytes[PAYLOAD_OFFSET..]);
-                    }
-
-                    unsafe {
-                        if ble_transport_to_hs_evt_impl(hci_ev as *mut c_void) != 0 {
-                            ble_transport_free(hci_ev as *mut _);
-                            panic!("Failed to send event to Host");
-                        }
-                    }
-                }
-                PacketType::Invalid => {
-                    todo!("Packet type not handled yet: {:02x}", packet_bytes[0])
-                }
+            }
+            PacketType::Invalid => {
+                todo!("Packet type not handled yet: {:02x}", packet_bytes[0])
             }
         }
     }
