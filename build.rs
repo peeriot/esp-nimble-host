@@ -106,6 +106,55 @@ fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
     fs::write(&file, patched).expect("Failed to write patched os_mempool.c");
 }
 
+/// Patch NimBLE's `ble_hs_event_rx_hci_ev` to call `ble_npl_event_deinit`
+/// before returning the event block to the memory pool.
+///
+/// # Why this is needed
+///
+/// When a `ble_npl_event` block is returned to the pool via `os_memblock_put`,
+/// the pool overwrites the first 4 bytes (`dummy`) with its free-list pointer.
+/// The heap-allocated `Event` struct that `dummy` previously pointed to becomes
+/// unreachable and is **leaked** (12 bytes per cycle).
+///
+/// By calling `ble_npl_event_deinit(ev)` before `os_memblock_put`, we free the
+/// heap `Event` and set `dummy = 0`.  The zero-on-alloc patch in
+/// `os_memblock_get` (see [`patch_os_mempool_zero_on_alloc`]) then acts as a
+/// safety net: even if a return-to-pool site is missed, the stale free-list
+/// pointer won't be mistaken for a valid `Event` — it will be zeroed and
+/// `ble_npl_event_init` will allocate a fresh `Event`.
+///
+/// # Maintenance note
+///
+/// As of NimBLE 1.9, `ble_hs_event_rx_hci_ev` in `ble_hs.c` is the **only**
+/// function that returns `ble_npl_event` blocks to `ble_hs_hci_ev_pool`.
+/// If a future NimBLE version adds more `os_memblock_put` call sites for this
+/// pool, those sites must also be patched — otherwise they will leak `Event`
+/// structs.  The zero-on-alloc safety net prevents crashes but not leaks.
+///
+/// To audit: `grep -rn 'os_memblock_put.*ble_hs_hci_ev_pool' nimble/host/src/`
+fn patch_ble_hs_event_deinit_before_pool_put(nimble_dir: &Path) {
+    let file = nimble_dir.join("nimble/host/src/ble_hs.c");
+    let src = fs::read_to_string(&file).expect("Failed to read ble_hs.c");
+
+    let needle = "    rc = os_memblock_put(&ble_hs_hci_ev_pool, ev);";
+
+    let replacement = "    /* [esp-nimble-host patch] Free the heap-allocated Event struct before\n     * returning the block to the pool.  Without this, the Event is leaked\n     * every time the pool recycles a block.  See build.rs for details. */\n    { extern void ble_npl_event_deinit(struct ble_npl_event *ev); ble_npl_event_deinit(ev); }\n    rc = os_memblock_put(&ble_hs_hci_ev_pool, ev);";
+
+    if !src.contains(needle) {
+        if src.contains("ble_npl_event_deinit(ev)") {
+            // Already patched in a previous build.
+            return;
+        }
+        panic!(
+            "Could not find the expected code pattern in ble_hs.c to apply \
+             the event-deinit-before-pool-put patch. The NimBLE version may have changed."
+        );
+    }
+
+    let patched = src.replace(needle, replacement);
+    fs::write(&file, patched).expect("Failed to write patched ble_hs.c");
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -115,6 +164,9 @@ fn main() {
 
     // Patch os_memblock_get to zero returned blocks (see doc comment for rationale).
     patch_os_mempool_zero_on_alloc(&nimble_dir);
+
+    // Patch ble_hs.c to free Event structs before returning blocks to pool.
+    patch_ble_hs_event_deinit_before_pool_put(&nimble_dir);
 
     // Local stub/override headers shipped with this crate.
     let stubs_dir = manifest_dir.join("nimble");
