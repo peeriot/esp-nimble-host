@@ -167,7 +167,7 @@ impl<M: RawMutex + 'static> ScannerControl<M> {
 /// Inner shared state (leaked to 'static).
 struct BleHostInner<M: RawMutex + 'static> {
     scan_cmd: Channel<M, ScanCommand<M>, 4>,
-    adv_pub: PubSubChannel<M, RawAdvertisement, 32, 1, 1>,
+    adv_pub: PubSubChannel<M, RawAdvertisement, 8, 1, 1>,
 }
 
 pub struct ScannerTask<M: RawMutex + 'static = DefaultRawMutex> {
@@ -183,14 +183,18 @@ impl<M: RawMutex + 'static> BleHost<M> {
     /// Create host handle + scanner task handle.
     /// You must spawn `ScannerTask::run()` on the executor.
     pub async fn new() -> (Self, ScannerTask<M>) {
+        log::trace!("BleHost::new - allocating inner");
         let inner: &'static BleHostInner<M> = Box::leak(Box::new(BleHostInner {
             scan_cmd: Channel::new(),
             adv_pub: PubSubChannel::new(),
         }));
+        log::trace!("BleHost::new - inner allocated at {:p}", inner);
 
         if !HOST_CONTROLLER_SYNCED.load(Ordering::Acquire) {
+            log::trace!("BleHost::new - waiting for sync");
             SyncFuture.await;
         }
+        log::trace!("BleHost::new - synced, creating host");
 
         let host = Self {
             inner,
@@ -198,6 +202,7 @@ impl<M: RawMutex + 'static> BleHost<M> {
         };
 
         let scanner = ScannerTask { inner };
+        log::trace!("BleHost::new - done");
         (host, scanner)
     }
 
@@ -208,7 +213,7 @@ impl<M: RawMutex + 'static> BleHost<M> {
     /// Subscribe to advertisements. Consumer should loop `next_message().await`.
     pub fn subscribe_advertisements(
         &self,
-    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, 32, 1, 1>, Error> {
+    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, 8, 1, 1>, Error> {
         self.inner
             .adv_pub
             .subscriber()
