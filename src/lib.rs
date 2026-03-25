@@ -87,6 +87,7 @@ const H4_ACL: u8 = 0x02;
 /// Scan control command
 struct ScanCommand<M: RawMutex> {
     pause: bool,
+    params: Option<BleGapDiscParams>,
     done: Arc<Signal<M, Result>>,
 }
 
@@ -122,6 +123,7 @@ impl<M: RawMutex + 'static> ScannerControl<M> {
         self.cmd_tx
             .send(ScanCommand {
                 pause: true,
+                params: None,
                 done: done.clone(),
             })
             .await;
@@ -138,7 +140,12 @@ impl<M: RawMutex + 'static> ScannerControl<M> {
         }
     }
 
-    pub async fn resume(&self) -> Result<()> {
+    /// Resume scanning with optional parameters.
+    ///
+    /// If `params` is `None`, uses the previously configured parameters (or
+    /// defaults on first call). Pass `Some(params)` to change scan interval,
+    /// window, passive mode, etc.
+    pub async fn resume_with_params(&self, params: Option<BleGapDiscParams>) -> Result<()> {
         if !self.paused.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -147,6 +154,7 @@ impl<M: RawMutex + 'static> ScannerControl<M> {
         self.cmd_tx
             .send(ScanCommand {
                 pause: false,
+                params,
                 done: done.clone(),
             })
             .await;
@@ -161,6 +169,11 @@ impl<M: RawMutex + 'static> ScannerControl<M> {
                 Err(e)
             }
         }
+    }
+
+    /// Resume scanning with the current/default parameters.
+    pub async fn resume(&self) -> Result<()> {
+        self.resume_with_params(None).await
     }
 }
 
@@ -223,8 +236,10 @@ impl<M: RawMutex + 'static> BleHost<M> {
 
 impl<M: RawMutex + 'static> ScannerTask<M> {
     pub async fn run(self) -> ! {
-        // TODO: define sane defaults
-        let disc_params = BleGapDiscParams::new(0, 0, 0, false, true, false);
+        // Default: passive scanning, 50 ms window every 160 ms (~31% duty cycle).
+        // Leaves radio time for WiFi coexistence. Units are 0.625 ms.
+        // 160 ms / 0.625 = 256, 50 ms / 0.625 = 80.
+        let mut disc_params = BleGapDiscParams::new(0, 256, 80, false, true, false);
         let mut is_paused = true;
 
         loop {
@@ -241,6 +256,11 @@ impl<M: RawMutex + 'static> ScannerTask<M> {
                     cmd.done.signal(Ok(()));
                 }
             } else {
+                // Update scan parameters if provided
+                if let Some(params) = cmd.params {
+                    disc_params = params;
+                }
+
                 if is_paused {
                     let own_addr_type = OWN_ADDR_TYPE.load(Ordering::SeqCst);
                     let param = self.inner as *const BleHostInner<M> as *mut c_void;
