@@ -16,12 +16,11 @@ mod service;
 
 use alloc::boxed::Box;
 use alloc::slice;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 pub use uuid;
 
-use crate::data::{Advertisement, BleGapDiscParams, RawAdvertisement};
+use crate::data::{BleGapDiscParams, RawAdvertisement};
 use crate::error::{Error, Result};
 use crate::nimble_sys::bindings::{
     BLE_HS_FOREVER, ble_transport_to_hs_acl_impl, ble_transport_to_hs_evt_impl,
@@ -41,24 +40,35 @@ use core::ffi::{c_int, c_void};
 use core::task::Poll;
 
 use embassy_futures::yield_now;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as DefaultRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex},
+    blocking_mutex::raw::RawMutex,
     channel::Channel,
     pubsub::{PubSubChannel, Subscriber},
-    signal::Signal,
 };
 use embassy_sync::waitqueue::AtomicWaker;
 use esp_radio::ble::controller::BleConnector;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
+
+// ── Host sync ────────────────────────────────────────────────────────────────
 
 /// Flag that gates the use of the host API only after it came in sync with the controller
 static HOST_CONTROLLER_SYNCED: AtomicBool = AtomicBool::new(false);
 static SYNC_WAKER: AtomicWaker = AtomicWaker::new();
 static OWN_ADDR_TYPE: AtomicU8 = AtomicU8::new(0);
 
+/// Wait until the BLE host and controller are synchronised.
+///
+/// Must be called (and awaited) before using any scanner or connection APIs.
+/// Returns immediately if already synced.
+pub async fn wait_for_sync() {
+    if !HOST_CONTROLLER_SYNCED.load(Ordering::Acquire) {
+        SyncFuture.await;
+    }
+}
+
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct SyncFuture;
+struct SyncFuture;
 
 impl core::future::Future for SyncFuture {
     type Output = ();
@@ -77,156 +87,107 @@ impl core::future::Future for SyncFuture {
     }
 }
 
-static HOST_2_CONTROLLER_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8>, 20> = Channel::new();
+// ── Scanner ──────────────────────────────────────────────────────────────────
 
-const MAX_CMD_PARAMS: usize = 255;
+/// Default advertisement PubSub capacity.
+const ADV_PUBSUB_CAP: usize = 32;
 
-const H4_CMD: u8 = 0x01;
-const H4_ACL: u8 = 0x02;
-
-/// Scan control command
-struct ScanCommand<M: RawMutex> {
-    pause: bool,
-    params: Option<BleGapDiscParams>,
-    done: Arc<Signal<M, Result>>,
+/// BLE advertisement scanner.
+///
+/// Wraps NimBLE's GAP discovery API with async Rust ergonomics. Call
+/// [`Scanner::new()`] after [`wait_for_sync()`], then use
+/// [`start_scan()`](Scanner::start_scan) / [`stop_scan()`](Scanner::stop_scan)
+/// to control scanning, and [`subscribe()`](Scanner::subscribe) to receive
+/// advertisements.
+///
+/// No background task needed — `ble_gap_disc` and `ble_gap_disc_cancel` are
+/// called directly. The NimBLE host task delivers advertisements via the GAP
+/// callback, which publishes into an internal `PubSubChannel`.
+pub struct Scanner<M: RawMutex + 'static = CriticalSectionRawMutex> {
+    inner: &'static ScannerInner<M>,
+    scanning: bool,
+    params: BleGapDiscParams,
 }
 
-pub struct ScannerControl<M: RawMutex + 'static = DefaultRawMutex> {
-    cmd_tx: &'static Channel<M, ScanCommand<M>, 4>,
-    paused: Arc<AtomicBool>,
+struct ScannerInner<M: RawMutex + 'static> {
+    adv_pub: PubSubChannel<M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>,
 }
 
-// Manual Clone avoids requiring M: Clone.
-impl<M: RawMutex + 'static> Clone for ScannerControl<M> {
-    fn clone(&self) -> Self {
-        Self {
-            cmd_tx: self.cmd_tx,
-            paused: self.paused.clone(),
-        }
-    }
-}
-
-impl<M: RawMutex + 'static> ScannerControl<M> {
-    fn new(cmd_tx: &'static Channel<M, ScanCommand<M>, 4>) -> Self {
-        Self {
-            cmd_tx,
-            paused: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    pub async fn pause(&self) -> Result<()> {
-        if self.paused.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        let done = Arc::new(Signal::<M, Result>::new());
-        self.cmd_tx
-            .send(ScanCommand {
-                pause: true,
-                params: None,
-                done: done.clone(),
-            })
-            .await;
-
-        match done.wait().await {
-            Ok(()) => {
-                self.paused.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            Err(e) => {
-                self.paused.store(false, Ordering::SeqCst);
-                Err(e)
-            }
-        }
-    }
-
-    /// Resume scanning with optional parameters.
+impl<M: RawMutex + 'static> Scanner<M> {
+    /// Create a new scanner. Call after [`wait_for_sync()`].
     ///
-    /// If `params` is `None`, uses the previously configured parameters (or
-    /// defaults on first call). Pass `Some(params)` to change scan interval,
-    /// window, passive mode, etc.
-    pub async fn resume_with_params(&self, params: Option<BleGapDiscParams>) -> Result<()> {
-        if !self.paused.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        let done = Arc::new(Signal::<M, Result>::new());
-        self.cmd_tx
-            .send(ScanCommand {
-                pause: false,
-                params,
-                done: done.clone(),
-            })
-            .await;
-
-        match done.wait().await {
-            Ok(()) => {
-                self.paused.store(false, Ordering::SeqCst);
-                Ok(())
-            }
-            Err(e) => {
-                self.paused.store(true, Ordering::SeqCst);
-                Err(e)
-            }
-        }
-    }
-
-    /// Resume scanning with the current/default parameters.
-    pub async fn resume(&self) -> Result<()> {
-        self.resume_with_params(None).await
-    }
-}
-
-/// Inner shared state (leaked to 'static).
-struct BleHostInner<M: RawMutex + 'static> {
-    scan_cmd: Channel<M, ScanCommand<M>, 4>,
-    adv_pub: PubSubChannel<M, RawAdvertisement, 8, 1, 1>,
-}
-
-pub struct ScannerTask<M: RawMutex + 'static = DefaultRawMutex> {
-    inner: &'static BleHostInner<M>,
-}
-
-pub struct BleHost<M: RawMutex + 'static = DefaultRawMutex> {
-    inner: &'static BleHostInner<M>,
-    scanner_control: ScannerControl<M>,
-}
-
-impl<M: RawMutex + 'static> BleHost<M> {
-    /// Create host handle + scanner task handle.
-    /// You must spawn `ScannerTask::run()` on the executor.
-    pub async fn new() -> (Self, ScannerTask<M>) {
-        log::trace!("BleHost::new - allocating inner");
-        let inner: &'static BleHostInner<M> = Box::leak(Box::new(BleHostInner {
-            scan_cmd: Channel::new(),
+    /// Does not start scanning — call [`start_scan()`](Self::start_scan) to begin.
+    pub fn new() -> Self {
+        let inner: &'static ScannerInner<M> = Box::leak(Box::new(ScannerInner {
             adv_pub: PubSubChannel::new(),
         }));
-        log::trace!("BleHost::new - inner allocated at {:p}", inner);
 
-        if !HOST_CONTROLLER_SYNCED.load(Ordering::Acquire) {
-            log::trace!("BleHost::new - waiting for sync");
-            SyncFuture.await;
-        }
-        log::trace!("BleHost::new - synced, creating host");
-
-        let host = Self {
+        Self {
             inner,
-            scanner_control: ScannerControl::new(&inner.scan_cmd),
-        };
-
-        let scanner = ScannerTask { inner };
-        log::trace!("BleHost::new - done");
-        (host, scanner)
+            scanning: false,
+            // Default: passive scanning, 50 ms window every 160 ms (~31% duty cycle).
+            // Leaves radio time for WiFi coexistence. Units are 0.625 ms.
+            params: BleGapDiscParams::new(0, 256, 80, false, true, false),
+        }
     }
 
-    pub fn scanner_control(&self) -> ScannerControl<M> {
-        self.scanner_control.clone()
+    /// Start BLE scanning.
+    ///
+    /// Pass `Some(params)` to configure scan interval, window, passive mode, etc.
+    /// Pass `None` to use the current parameters (or defaults on first call).
+    ///
+    /// Idempotent — does nothing if already scanning.
+    pub fn start_scan(&mut self, params: Option<BleGapDiscParams>) -> Result<()> {
+        if self.scanning {
+            return Ok(());
+        }
+
+        if let Some(p) = params {
+            self.params = p;
+        }
+
+        let own_addr_type = OWN_ADDR_TYPE.load(Ordering::SeqCst);
+        let cb_arg = self.inner as *const ScannerInner<M> as *mut c_void;
+
+        ble_gap_disc(
+            own_addr_type,
+            BLE_HS_FOREVER as _,
+            &self.params,
+            Some(scan_event_handler::<M>),
+            cb_arg,
+        )
+        .map_err(|_| Error::Scan("ble_gap_disc failed".into()))?;
+
+        self.scanning = true;
+        Ok(())
     }
 
-    /// Subscribe to advertisements. Consumer should loop `next_message().await`.
-    pub fn subscribe_advertisements(
+    /// Stop BLE scanning.
+    ///
+    /// Idempotent — does nothing if not scanning.
+    pub fn stop_scan(&mut self) -> Result<()> {
+        if !self.scanning {
+            return Ok(());
+        }
+
+        ble_gap_disc_cancel().map_err(|_| Error::Scan("ble_gap_disc_cancel failed".into()))?;
+        self.scanning = false;
+        Ok(())
+    }
+
+    /// Whether the scanner is currently active.
+    pub fn is_scanning(&self) -> bool {
+        self.scanning
+    }
+
+    /// Subscribe to received advertisements.
+    ///
+    /// Returns a `Subscriber` — call `next_message().await` in a loop to
+    /// receive advertisements. Multiple subscribers are supported (up to 4).
+    pub fn subscribe(
         &self,
-    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, 8, 1, 1>, Error> {
+    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>, Error>
+    {
         self.inner
             .adv_pub
             .subscriber()
@@ -234,72 +195,22 @@ impl<M: RawMutex + 'static> BleHost<M> {
     }
 }
 
-impl<M: RawMutex + 'static> ScannerTask<M> {
-    pub async fn run(self) -> ! {
-        // Default: passive scanning, 50 ms window every 160 ms (~31% duty cycle).
-        // Leaves radio time for WiFi coexistence. Units are 0.625 ms.
-        // 160 ms / 0.625 = 256, 50 ms / 0.625 = 80.
-        let mut disc_params = BleGapDiscParams::new(0, 256, 80, false, true, false);
-        let mut is_paused = true;
-
-        loop {
-            let cmd = self.inner.scan_cmd.receive().await;
-
-            if cmd.pause {
-                if !is_paused {
-                    match ble_gap_disc_cancel() {
-                        Ok(_) => cmd.done.signal(Ok(())),
-                        Err(_) => cmd.done.signal(Err(Error::ScannerControlFailedToPause)),
-                    }
-                    is_paused = true;
-                } else {
-                    cmd.done.signal(Ok(()));
-                }
-            } else {
-                // Update scan parameters if provided
-                if let Some(params) = cmd.params {
-                    disc_params = params;
-                }
-
-                if is_paused {
-                    let own_addr_type = OWN_ADDR_TYPE.load(Ordering::SeqCst);
-                    let param = self.inner as *const BleHostInner<M> as *mut c_void;
-
-                    match ble_gap_disc(
-                        own_addr_type,
-                        BLE_HS_FOREVER as _,
-                        &disc_params,
-                        Some(ble_gap_event_handler::<M>),
-                        param,
-                    ) {
-                        Ok(_) => cmd.done.signal(Ok(())),
-                        Err(_) => cmd.done.signal(Err(Error::ScannerControlFailedToResume)),
-                    }
-                    is_paused = false;
-                } else {
-                    cmd.done.signal(Ok(()));
-                }
-            }
-        }
-    }
-}
-
-/// GAP scan callback (generic over RawMutex so it can publish into the correct channel type).
-extern "C" fn ble_gap_event_handler<M: RawMutex + 'static>(
+/// GAP scan callback — publishes advertisements into the Scanner's PubSubChannel.
+extern "C" fn scan_event_handler<M: RawMutex + 'static>(
     event: *mut ble_gap_event,
     arg: *mut c_void,
 ) -> c_int {
     if event.is_null() || arg.is_null() {
-        panic!("ble_gap_event_handler received null pointer: event={event:p}, arg={arg:p}");
+        panic!("scan_event_handler received null pointer: event={event:p}, arg={arg:p}");
     }
 
-    let inner = unsafe { &*(arg as *const BleHostInner<M>) };
+    let inner = unsafe { &*(arg as *const ScannerInner<M>) };
     let event = unsafe { *event };
 
     match event.type_ as u32 {
         BLE_GAP_EVENT_DISC | BLE_GAP_EVENT_EXT_DISC => {
             let disc: &ble_gap_disc_desc = unsafe { &event.__bindgen_anon_1.disc };
-            if let Ok(fields) = ble_hs_adv_parse_fields(disc) {
+            if let Ok(_fields) = ble_hs_adv_parse_fields(disc) {
                 let data = unsafe { slice::from_raw_parts(disc.data, disc.length_data as usize) };
                 let adv = RawAdvertisement::new(
                     disc.addr.into(),
@@ -320,6 +231,15 @@ extern "C" fn ble_gap_event_handler<M: RawMutex + 'static>(
 
     0
 }
+
+// ── HCI Transport ────────────────────────────────────────────────────────────
+
+static HOST_2_CONTROLLER_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8>, 20> = Channel::new();
+
+const MAX_CMD_PARAMS: usize = 255;
+
+const H4_CMD: u8 = 0x01;
+const H4_ACL: u8 = 0x02;
 
 pub struct HostTransport {
     controller: BleConnector<'static>,
@@ -487,6 +407,8 @@ pub extern "C" fn host_task(_: *mut c_void) {
     nimble_port_run();
 }
 
+// ── NimBLE C FFI callbacks ───────────────────────────────────────────────────
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_ll_init() {
     // No-Op because esp-radio does it for us
@@ -530,12 +452,10 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
     }
 
     // Compute total length of the mbuf chain.
-    // (Function names may differ slightly in your bindings; adjust if needed.)
     let mut total_len: usize = 0;
     {
         let mut cur = om;
         while !cur.is_null() {
-            // os_mbuf fields: om_len is length of this segment, om_next is next segment
             total_len += (*cur).om_len as usize;
             cur = (*cur).om_next.sle_next;
         }
