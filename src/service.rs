@@ -1,15 +1,15 @@
-use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 use uuid::Uuid;
 
 use crate::characteristic::Characteristic;
 
 /// Represents a Bluetooth service with a unique identifier and a range of handles.
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Service {
     uuid: Uuid,
     start_handle: u16,
     end_handle: u16,
-    characteristics: BTreeSet<Characteristic>,
+    characteristics: Vec<Characteristic>,
 }
 
 impl Service {
@@ -19,17 +19,17 @@ impl Service {
             uuid,
             start_handle,
             end_handle,
-            characteristics: BTreeSet::new(),
+            characteristics: Vec::new(),
         }
     }
 
-    /// Returns a reference to the set of characteristics.
-    pub fn characteristics(&self) -> &BTreeSet<Characteristic> {
+    /// Returns a reference to the characteristics.
+    pub fn characteristics(&self) -> &[Characteristic] {
         &self.characteristics
     }
 
-    /// Returns a mutable reference to the set of characteristics.
-    pub fn characteristics_mut(&mut self) -> &mut BTreeSet<Characteristic> {
+    /// Returns a mutable reference to the characteristics.
+    pub fn characteristics_mut(&mut self) -> &mut Vec<Characteristic> {
         &mut self.characteristics
     }
 

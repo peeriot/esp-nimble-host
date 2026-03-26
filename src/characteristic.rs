@@ -1,7 +1,7 @@
-use alloc::{collections::BTreeSet, sync::Arc};
+use alloc::{sync::Arc, vec::Vec};
 
 use bytes::Bytes;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use uuid::Uuid;
 
 use crate::{
@@ -37,12 +37,12 @@ impl Descriptor {
 }
 
 /// Represents a BLE characteristic with a UUID, handle, and associated descriptors.
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Characteristic {
     uuid: Uuid,
     handle: u16,
     def_handle: u16,
-    descriptors: BTreeSet<Descriptor>,
+    descriptors: Vec<Descriptor>,
 }
 
 impl Characteristic {
@@ -51,7 +51,7 @@ impl Characteristic {
             uuid,
             handle,
             def_handle,
-            descriptors: Default::default(),
+            descriptors: Vec::new(),
         }
     }
 
@@ -67,11 +67,11 @@ impl Characteristic {
         self.uuid
     }
 
-    pub fn descriptors(&self) -> &BTreeSet<Descriptor> {
+    pub fn descriptors(&self) -> &[Descriptor] {
         &self.descriptors
     }
 
-    pub fn descriptors_mut(&mut self) -> &mut BTreeSet<Descriptor> {
+    pub fn descriptors_mut(&mut self) -> &mut Vec<Descriptor> {
         &mut self.descriptors
     }
 }
@@ -83,12 +83,12 @@ pub type ReadOperationContext = Option<Bytes>;
 pub async fn read_attribute(conn_handle: ConnectionHandle, handle: u16) -> GattResult<Bytes> {
     // If your helper is generic over RawMutex, pass it here explicitly (e.g. <ReadOperationContext, M>).
     let (operation, operation_handle) =
-        peripheral_operation::<ReadOperationContext, NoopRawMutex>(conn_handle, None);
+        peripheral_operation::<ReadOperationContext, CriticalSectionRawMutex>(conn_handle, None);
 
     ble_gattc_read(
         conn_handle,
         handle,
-        Some(read_attribute_callback::<NoopRawMutex>),
+        Some(read_attribute_callback::<CriticalSectionRawMutex>),
         &operation as *const PeripheralOperation<ReadOperationContext, _> as _,
     )
     .map_err(GattError::ReadFailed)?;
@@ -165,7 +165,7 @@ pub async fn write_attribute(
     data: Arc<[u8]>,
     response: bool,
 ) -> GattResult {
-    let (operation, operation_handle) = peripheral_operation::<(), NoopRawMutex>(conn_handle, ());
+    let (operation, operation_handle) = peripheral_operation::<(), CriticalSectionRawMutex>(conn_handle, ());
     let data = data.as_ref();
 
     let mtu = ble_att_mtu(conn_handle).map_err(GattError::WriteFailed)?;
@@ -187,7 +187,7 @@ pub async fn write_attribute(
             conn_handle,
             attr_handle,
             data,
-            Some(write_attribute_callback::<NoopRawMutex>),
+            Some(write_attribute_callback::<CriticalSectionRawMutex>),
             &operation as *const PeripheralOperation<(), _> as _,
         )
         .map_err(GattError::WriteFailed)?;
@@ -197,7 +197,7 @@ pub async fn write_attribute(
             attr_handle,
             0,
             data,
-            Some(write_attribute_callback::<NoopRawMutex>),
+            Some(write_attribute_callback::<CriticalSectionRawMutex>),
             &operation as *const PeripheralOperation<(), _> as _,
         )
         .map_err(GattError::WriteFailed)?;

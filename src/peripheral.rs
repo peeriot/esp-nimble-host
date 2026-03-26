@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, collections::BTreeSet, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use embassy_futures::select::{Either, select};
 use embassy_sync::{
@@ -52,7 +52,7 @@ struct PeripheralInner<M: RawMutex + 'static> {
     /// Safety: mutated from discovery (async, one at a time) and cleared
     /// from the disconnect callback (NimBLE host task). Both are serialised
     /// by the connection lifecycle — you can't discover while disconnected.
-    services: BlockingMutex<M, BTreeSet<Service>>,
+    services: BlockingMutex<M, Vec<Service>>,
 
     /// Notifications/indications stream: (attr_handle, payload).
     subscription_pub: PubSubChannel<M, (u16, Vec<u8>), 16, 4, 1>,
@@ -88,7 +88,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             conn_handle: AtomicU16::new(CONN_HANDLE_NONE),
             connect_signal: BlockingMutex::new(None),
             disconnect_pub: PubSubChannel::new(),
-            services: BlockingMutex::new(BTreeSet::new()),
+            services: BlockingMutex::new(Vec::new()),
             subscription_pub: PubSubChannel::new(),
         }));
 
@@ -207,7 +207,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             // Safety: discovery is serialised by connection lifecycle.
             unsafe {
                 self.inner.services.lock_mut(|s| {
-                    s.insert(service);
+                    s.push(service);
                 })
             };
         }
@@ -244,8 +244,8 @@ impl<M: RawMutex + 'static> Peripheral<M> {
     }
 
     /// Returns a snapshot of the cached services.
-    pub fn services(&self) -> BTreeSet<Service> {
-        self.inner.services.lock(|s| s.iter().cloned().collect())
+    pub fn services(&self) -> Vec<Service> {
+        self.inner.services.lock(|s| s.clone())
     }
 
     pub async fn read(&self, characteristic: &Characteristic) -> GattResult<bytes::Bytes> {
