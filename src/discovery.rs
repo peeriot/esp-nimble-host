@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::{
     characteristic::{Characteristic, Descriptor},
     data::{ConnectionHandle, nimble_uuid_to_uuid, uuid_to_nimble_uuid},
-    error::{Error, Result},
+    error::{GattError, GattResult},
     nimble_sys::{
         bindings::{BLE_HS_EDONE, ble_gatt_chr, ble_gatt_dsc, ble_gatt_error, ble_gatt_svc},
         ble_gattc_disc_all_chrs, ble_gattc_disc_all_dscs, ble_gattc_disc_all_svcs,
@@ -26,7 +26,7 @@ impl ServiceDiscovery {
         Self { conn_handle }
     }
 
-    pub async fn run(self) -> Result<BTreeSet<Service>> {
+    pub async fn run(self) -> GattResult<BTreeSet<Service>> {
         let mut services = nimble_discover_services(self.conn_handle).await?;
 
         for service in services.iter_mut() {
@@ -43,7 +43,7 @@ impl ServiceDiscovery {
         Ok(services.into_iter().collect())
     }
 
-    async fn discover_characteristics(&self, service: &mut Service) -> Result<()> {
+    async fn discover_characteristics(&self, service: &mut Service) -> GattResult<()> {
         let chars = nimble_discover_characteristics(
             self.conn_handle,
             service.start_handle(),
@@ -59,7 +59,7 @@ impl ServiceDiscovery {
         &self,
         service: &Service,
         characteristic: &mut Characteristic,
-    ) -> Result<()> {
+    ) -> GattResult<()> {
         // NOTE: your original code passed service start/end for descriptor discovery.
         // If you intended "per characteristic", you likely want (chr_def_handle..end_handle)
         // or (chr_val_handle..service_end). Kept same semantics as your snippet.
@@ -90,7 +90,7 @@ impl ServiceCharacteristicsDiscovery {
         }
     }
 
-    pub async fn run(self) -> Result<Option<Service>> {
+    pub async fn run(self) -> GattResult<Option<Service>> {
         let mut services =
             nimble_discover_service_by_uuid(self.conn_handle, &self.service_uuid).await?;
 
@@ -110,7 +110,7 @@ impl ServiceCharacteristicsDiscovery {
         Ok(None)
     }
 
-    async fn discover_characteristics(&self, service: &mut Service) -> Result<()> {
+    async fn discover_characteristics(&self, service: &mut Service) -> GattResult<()> {
         let chars = nimble_discover_characteristics(
             self.conn_handle,
             service.start_handle(),
@@ -126,7 +126,7 @@ impl ServiceCharacteristicsDiscovery {
         &self,
         service: &Service,
         characteristic: &mut Characteristic,
-    ) -> Result<()> {
+    ) -> GattResult<()> {
         // NOTE: your original code passed service start/end for descriptor discovery.
         // If you intended "per characteristic", you likely want (chr_def_handle..end_handle)
         // or (chr_val_handle..service_end). Kept same semantics as your snippet.
@@ -146,7 +146,7 @@ impl ServiceCharacteristicsDiscovery {
 }
 
 /// Initiates the discovery of all services.
-async fn nimble_discover_services(conn_handle: ConnectionHandle) -> Result<Vec<Service>> {
+async fn nimble_discover_services(conn_handle: ConnectionHandle) -> GattResult<Vec<Service>> {
     // IMPORTANT: choose the same RawMutex you used elsewhere (e.g. CriticalSectionRawMutex).
     // If your helper is generic like peripheral_operation::<T, M>, pass the M.
     let (operation, operation_handle) =
@@ -157,19 +157,19 @@ async fn nimble_discover_services(conn_handle: ConnectionHandle) -> Result<Vec<S
         Some(service_discovered_cb::<NoopRawMutex>),
         &operation as *const PeripheralOperation<Vec<Service>, _> as _,
     )
-    .map_err(Error::ServiceDiscovery)?;
+    .map_err(GattError::ServiceDiscoveryFailed)?;
 
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| Error::NoServicesDiscovered)
+        .ok_or_else(|| GattError::NoServicesDiscovered)
 }
 
 /// Initiates the discovery of services by uuid.
 async fn nimble_discover_service_by_uuid(
     conn_handle: ConnectionHandle,
     service_uuid: &Uuid,
-) -> Result<Vec<Service>> {
+) -> GattResult<Vec<Service>> {
     let (operation, operation_handle) =
         peripheral_operation::<Vec<Service>, NoopRawMutex>(conn_handle, Vec::new());
 
@@ -179,12 +179,12 @@ async fn nimble_discover_service_by_uuid(
         Some(service_discovered_cb::<NoopRawMutex>),
         &operation as *const PeripheralOperation<Vec<Service>, _> as _,
     )
-    .map_err(Error::ServiceDiscovery)?;
+    .map_err(GattError::ServiceDiscoveryFailed)?;
 
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| Error::NoServicesDiscovered)
+        .ok_or_else(|| GattError::NoServicesDiscovered)
 }
 
 /// Callback: service discovery
@@ -226,7 +226,7 @@ where
                 };
             }
             Err(e) => {
-                operation.send_finished(Err(e));
+                operation.send_finished(Err(e.into()));
             }
         }
         return 0;
@@ -245,7 +245,7 @@ async fn nimble_discover_characteristics(
     conn_handle: ConnectionHandle,
     start_handle: u16,
     end_handle: u16,
-) -> Result<BTreeSet<Characteristic>> {
+) -> GattResult<BTreeSet<Characteristic>> {
     let (operation, operation_handle) = peripheral_operation::<
         BTreeSet<Characteristic>,
         NoopRawMutex,
@@ -258,12 +258,12 @@ async fn nimble_discover_characteristics(
         Some(characteristic_disc_cb::<NoopRawMutex>),
         &operation as *const PeripheralOperation<BTreeSet<Characteristic>, _> as _,
     )
-    .map_err(Error::CharacteristicDiscovery)?;
+    .map_err(GattError::CharacteristicDiscoveryFailed)?;
 
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| Error::NoCharacteristicsDiscovered)
+        .ok_or_else(|| GattError::NoCharacteristicsDiscovered)
 }
 
 extern "C" fn characteristic_disc_cb<M>(
@@ -304,7 +304,7 @@ where
                 };
             }
             Err(e) => {
-                operation.send_finished(Err(e));
+                operation.send_finished(Err(e.into()));
             }
         }
         return 0;
@@ -321,7 +321,7 @@ async fn nimble_discover_characteristic_descriptors(
     conn_handle: ConnectionHandle,
     start_handle: u16,
     end_handle: u16,
-) -> Result<BTreeSet<Descriptor>> {
+) -> GattResult<BTreeSet<Descriptor>> {
     let (operation, operation_handle) =
         peripheral_operation::<BTreeSet<Descriptor>, NoopRawMutex>(conn_handle, BTreeSet::new());
 
@@ -332,12 +332,12 @@ async fn nimble_discover_characteristic_descriptors(
         Some(characteristic_descriptor_disc_cb::<NoopRawMutex>),
         &operation as *const PeripheralOperation<BTreeSet<Descriptor>, _> as _,
     )
-    .map_err(Error::DescriptorDiscovery)?;
+    .map_err(GattError::DescriptorDiscoveryFailed)?;
 
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| Error::NoDescriptorsDiscovered)
+        .ok_or_else(|| GattError::NoDescriptorsDiscovered)
 }
 
 extern "C" fn characteristic_descriptor_disc_cb<M>(
@@ -378,7 +378,7 @@ where
                 };
             }
             Err(e) => {
-                operation.send_finished(Err(e));
+                operation.send_finished(Err(e.into()));
             }
         }
         return 0;

@@ -4,7 +4,7 @@ use core::fmt::Debug;
 use uuid::Uuid;
 
 use crate::{
-    error::{Error, Result},
+    error::DataError,
     nimble_sys::bindings,
 };
 
@@ -74,17 +74,17 @@ impl BleAddr {
     /// // 0 = public, 1 = random (as used by NimBLE)
     /// let a = BleAddr::parse_str_with_type(1, "cd:7b:13:a5:99:6a")?;
     /// ```
-    pub fn parse_str_with_type(type_: u8, addr: &str) -> Result<Self> {
+    pub fn parse_str_with_type(type_: u8, addr: &str) -> core::result::Result<Self, DataError> {
         let mut parts: alloc::vec::Vec<u8> = addr
             .split(':')
             .map(|p| u8::from_str_radix(p, 16))
             .collect::<core::result::Result<_, _>>()
             .map_err(|_| {
-                Error::InvalidArgument(format!("Unable to parse MAC address: '{addr}'").into())
+                DataError::InvalidArgument(format!("Unable to parse MAC address: '{addr}'").into())
             })?;
 
         if parts.len() != 6 {
-            return Err(Error::InvalidArgument(
+            return Err(DataError::InvalidArgument(
                 format!("Unable to parse MAC address: '{addr}'").into(),
             ));
         }
@@ -92,7 +92,7 @@ impl BleAddr {
         parts.reverse();
         Ok(Self {
             type_,
-            addr: parts.try_into().map_err(|_| Error::BleAddrConversion)?,
+            addr: parts.try_into().map_err(|_| DataError::BleAddrConversion)?,
         })
     }
 
@@ -525,18 +525,18 @@ pub fn uuid_to_nimble_uuid(uuid: &Uuid) -> NimbleUuid {
 /// # Returns
 ///
 /// Returns a Rust `Uuid` if conversion is successful, otherwise an error.
-pub fn nimble_uuid_to_uuid(uuid: &bindings::ble_uuid_any_t) -> Result<Uuid> {
+pub fn nimble_uuid_to_uuid(uuid: &bindings::ble_uuid_any_t) -> core::result::Result<Uuid, DataError> {
     unsafe {
         match uuid.u.type_ as _ {
             bindings::BLE_UUID_TYPE_16 => Ok(uuid_from_u16(uuid.u16_.value)),
             bindings::BLE_UUID_TYPE_32 => Ok(uuid_from_u32(uuid.u32_.value)),
             bindings::BLE_UUID_TYPE_128 => match Uuid::from_slice(&uuid.u128_.value) {
                 Ok(uuid) => Ok(uuid),
-                Err(err) => Err(Error::UuidConversion(
+                Err(err) => Err(DataError::UuidConversion(
                     format!("Unable to decode 128bit UUID: {err}").into(),
                 )),
             },
-            _ => Err(Error::UuidConversion(
+            _ => Err(DataError::UuidConversion(
                 format!("Invalid UUID type: {}", uuid.u.type_).into(),
             )),
         }

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     data::{AttributeHandle, ConnectionHandle},
-    error::{Error, Result},
+    error::{GattError, GattResult},
     nimble_sys::{
         bindings::{ble_gatt_attr, ble_gatt_error},
         ble_att_mtu, ble_gattc_read, ble_gattc_write_flat, ble_gattc_write_long,
@@ -80,7 +80,7 @@ impl Characteristic {
 pub type ReadOperationContext = Option<Bytes>;
 
 /// Reads a BLE attribute.
-pub async fn read_attribute(conn_handle: ConnectionHandle, handle: u16) -> Result<Bytes> {
+pub async fn read_attribute(conn_handle: ConnectionHandle, handle: u16) -> GattResult<Bytes> {
     // If your helper is generic over RawMutex, pass it here explicitly (e.g. <ReadOperationContext, M>).
     let (operation, operation_handle) =
         peripheral_operation::<ReadOperationContext, NoopRawMutex>(conn_handle, None);
@@ -91,14 +91,14 @@ pub async fn read_attribute(conn_handle: ConnectionHandle, handle: u16) -> Resul
         Some(read_attribute_callback::<NoopRawMutex>),
         &operation as *const PeripheralOperation<ReadOperationContext, _> as _,
     )
-    .map_err(Error::ReadAttribute)?;
+    .map_err(GattError::ReadFailed)?;
 
     operation_handle.join().await?;
 
     operation
         .take_context()
         .flatten()
-        .ok_or_else(|| Error::ReadCharacteristic("No data received".into()))
+        .ok_or(GattError::NoData)
 }
 
 extern "C" fn read_attribute_callback<M>(
@@ -127,7 +127,7 @@ where
     // If status is nonzero, attr may legitimately be null.
     if error.status != 0 {
         operation.send_finished(
-            return_code_to_result(error.status as u32, ()).map_err(Error::ReadAttribute),
+            return_code_to_result(error.status as u32, ()).map_err(GattError::ReadFailed),
         );
         return 0;
     }
@@ -135,7 +135,7 @@ where
     // status == 0 => we must have an attr with data
     if attr.is_null() {
         log::error!("read_attribute_callback: status==0 but attr is NULL");
-        operation.send_finished(Err(Error::ReadCharacteristic("No attribute".into())));
+        operation.send_finished(Err(GattError::NoData));
         return 0;
     }
 
@@ -151,7 +151,7 @@ where
             operation.send_finished(Ok(()));
         }
         Err(e) => {
-            operation.send_finished(Err(Error::ReadAttribute(e)));
+            operation.send_finished(Err(GattError::ReadFailed(e)));
         }
     }
 
@@ -164,22 +164,21 @@ pub async fn write_attribute(
     attr_handle: AttributeHandle,
     data: Arc<[u8]>,
     response: bool,
-) -> Result {
+) -> GattResult {
     let (operation, operation_handle) = peripheral_operation::<(), NoopRawMutex>(conn_handle, ());
     let data = data.as_ref();
 
-    let mtu = ble_att_mtu(conn_handle).map_err(Error::WriteAttribute)?;
+    let mtu = ble_att_mtu(conn_handle).map_err(GattError::WriteFailed)?;
 
-    // TODO: How to handle MTU being < 3?
     let mtu = (mtu
         .get()
         .checked_sub(3)
-        .ok_or_else(|| Error::WriteCharacteristic("Unable to get MTU".into()))?)
+        .ok_or(GattError::AttMtuZero(conn_handle))?)
         as usize;
 
     if !response && data.len() <= mtu {
         ble_gattc_write_no_rsp_flat(conn_handle, attr_handle, data)
-            .map_err(Error::WriteAttribute)?;
+            .map_err(GattError::WriteFailed)?;
         return Ok(());
     }
 
@@ -191,7 +190,7 @@ pub async fn write_attribute(
             Some(write_attribute_callback::<NoopRawMutex>),
             &operation as *const PeripheralOperation<(), _> as _,
         )
-        .map_err(Error::WriteAttribute)?;
+        .map_err(GattError::WriteFailed)?;
     } else {
         ble_gattc_write_long(
             conn_handle,
@@ -201,7 +200,7 @@ pub async fn write_attribute(
             Some(write_attribute_callback::<NoopRawMutex>),
             &operation as *const PeripheralOperation<(), _> as _,
         )
-        .map_err(Error::WriteAttribute)?;
+        .map_err(GattError::WriteFailed)?;
     }
 
     operation_handle.join().await
@@ -229,7 +228,7 @@ where
     }
 
     operation.send_finished(
-        return_code_to_result(error.status as u32, ()).map_err(Error::WriteAttribute),
+        return_code_to_result(error.status as u32, ()).map_err(GattError::WriteFailed),
     );
 
     error.status as _

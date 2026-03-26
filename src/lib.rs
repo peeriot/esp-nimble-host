@@ -21,7 +21,9 @@ use alloc::vec::Vec;
 pub use uuid;
 
 use crate::data::{BleGapDiscParams, RawAdvertisement};
-use crate::error::{Error, Result};
+// Re-export public types
+pub use crate::data::Advertisement;
+use crate::error::{Error, InternalError, ScanError, ScanResult};
 use crate::nimble_sys::bindings::{
     BLE_HS_FOREVER, ble_transport_to_hs_acl_impl, ble_transport_to_hs_evt_impl,
 };
@@ -137,7 +139,7 @@ impl<M: RawMutex + 'static> Scanner<M> {
     /// Pass `None` to use the current parameters (or defaults on first call).
     ///
     /// Idempotent — does nothing if already scanning.
-    pub fn start_scan(&mut self, params: Option<BleGapDiscParams>) -> Result<()> {
+    pub fn start_scan(&mut self, params: Option<BleGapDiscParams>) -> ScanResult<()> {
         if self.scanning {
             return Ok(());
         }
@@ -156,7 +158,7 @@ impl<M: RawMutex + 'static> Scanner<M> {
             Some(scan_event_handler::<M>),
             cb_arg,
         )
-        .map_err(|_| Error::Scan("ble_gap_disc failed".into()))?;
+        .map_err(ScanError::GapDiscFailed)?;
 
         self.scanning = true;
         Ok(())
@@ -165,12 +167,12 @@ impl<M: RawMutex + 'static> Scanner<M> {
     /// Stop BLE scanning.
     ///
     /// Idempotent — does nothing if not scanning.
-    pub fn stop_scan(&mut self) -> Result<()> {
+    pub fn stop_scan(&mut self) -> ScanResult<()> {
         if !self.scanning {
             return Ok(());
         }
 
-        ble_gap_disc_cancel().map_err(|_| Error::Scan("ble_gap_disc_cancel failed".into()))?;
+        ble_gap_disc_cancel().map_err(ScanError::GapDiscCancelFailed)?;
         self.scanning = false;
         Ok(())
     }
@@ -186,12 +188,12 @@ impl<M: RawMutex + 'static> Scanner<M> {
     /// receive advertisements. Multiple subscribers are supported (up to 4).
     pub fn subscribe(
         &self,
-    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>, Error>
+    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>, InternalError>
     {
         self.inner
             .adv_pub
             .subscriber()
-            .map_err(|_| Error::ResultChannelClosed)
+            .map_err(|_| InternalError::ChannelClosed)
     }
 }
 

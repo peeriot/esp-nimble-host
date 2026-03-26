@@ -14,7 +14,7 @@ use crate::{
     characteristic::{Characteristic, Descriptor, read_attribute, write_attribute},
     data::BleAddr,
     discovery::{ServiceCharacteristicsDiscovery, ServiceDiscovery},
-    error::{Error, Result},
+    error::{ConnectError, ConnectResult, GattError, GattResult, InternalError},
     nimble_sys::*,
     peripheral_operation::{PeripheralOperation, peripheral_operation},
     service::Service,
@@ -45,7 +45,7 @@ pub struct Peripheral<M: RawMutex = DefaultRawMutex> {
     connection_state: Arc<BlockingMutex<M, ConnectionState>>,
 
     /// Slot that holds the current connect-attempt signal, if any.
-    connect_signal: Arc<BlockingMutex<M, Option<Arc<Signal<M, Result>>>>>,
+    connect_signal: Arc<BlockingMutex<M, Option<Arc<Signal<M, ConnectResult>>>>>,
 
     /// Disconnect notifications (multi-subscriber).
     disconnect_pub: Arc<PubSubChannel<M, (), 4, 4, 1>>,
@@ -69,13 +69,13 @@ impl<M: RawMutex> Peripheral<M> {
         }
     }
 
-    pub async fn connect(&self) -> Result {
+    pub async fn connect(&self) -> ConnectResult {
         log::info!("Connecting to peripheral at {:?}", self.addr);
 
         let _guard = CONNECT_LOCK.lock().await;
         log::info!("Acquired connect lock for {:?}", self.addr);
 
-        let attempt = Arc::new(Signal::<M, Result>::new());
+        let attempt = Arc::new(Signal::<M, ConnectResult>::new());
         unsafe {
             self.connect_signal.lock_mut(|slot| {
                 *slot = Some(attempt.clone());
@@ -91,24 +91,24 @@ impl<M: RawMutex> Peripheral<M> {
             Some(Self::gap_event_handler),
             self as *const Self as _,
         )
-        .map_err(Error::Connect)?;
+        .map_err(ConnectError::GapConnectFailed)?;
 
         let mut disc_sub = self
             .disconnect_pub
             .subscriber()
-            .map_err(|_| Error::ResultChannelClosed)?;
+            .map_err(|_| ConnectError::DisconnectedWhileOperation)?;
 
         log::info!("Waiting for connection result for {:?}", self.addr);
 
         match select(attempt.wait(), disc_sub.next_message()).await {
             Either::First(result) => result,
             Either::Second(WaitResult::Message(())) | Either::Second(WaitResult::Lagged(_)) => {
-                Err(Error::DisconnectedWhileOperation)
+                Err(ConnectError::DisconnectedWhileOperation)
             }
         }
     }
 
-    pub async fn disconnect(&self) -> Result {
+    pub async fn disconnect(&self) -> ConnectResult {
         log::debug!("Disconnecting");
 
         let conn_handle = self.connection_state.lock(|s| match *s {
@@ -124,31 +124,31 @@ impl<M: RawMutex> Peripheral<M> {
         let mut disc_sub = self
             .disconnect_pub
             .subscriber()
-            .map_err(|_| Error::ResultChannelClosed)?;
+            .map_err(|_| ConnectError::DisconnectedWhileOperation)?;
 
         ble_gap_terminate(
             conn_handle,
             bindings::ble_error_codes_BLE_ERR_REM_USER_CONN_TERM as _,
         )
-        .map_err(Error::Disconnect)?;
+        .map_err(ConnectError::DisconnectFailed)?;
 
         match disc_sub.next_message().await {
             WaitResult::Message(()) | WaitResult::Lagged(_) => Ok(()),
         }
     }
 
-    pub async fn is_connected(&self) -> bool {
+    pub fn is_connected(&self) -> bool {
         self.connection_state.lock(|s| s.is_connected())
     }
 
-    pub async fn exchange_mtu(&self) -> Result {
+    pub async fn exchange_mtu(&self) -> GattResult {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
 
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::ReadCharacteristic("Not connected".into()));
+            return Err(GattError::NotConnected);
         };
 
         let (operation, operation_handle) = peripheral_operation::<u16, M>(conn_handle, 0);
@@ -158,19 +158,19 @@ impl<M: RawMutex> Peripheral<M> {
             Some(Self::exchange_mtu_callback),
             &operation as *const PeripheralOperation<u16, M> as _,
         )
-        .expect("Unable to exchange MTU");
+        .map_err(GattError::MtuExchangeFailed)?;
 
         operation_handle.join().await
     }
 
     /// Discover a specific service by UUID and cache it in `self.services`.
-    pub async fn discover_service_by_uuid(&self, uuid: &Uuid) -> Result<()> {
+    pub async fn discover_service_by_uuid(&self, uuid: &Uuid) -> GattResult<()> {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::NotConnected);
+            return Err(GattError::NotConnected);
         };
 
         let discovery = ServiceCharacteristicsDiscovery::new(conn_handle, uuid);
@@ -178,12 +178,12 @@ impl<M: RawMutex> Peripheral<M> {
         let mut disc_sub = self
             .disconnect_pub
             .subscriber()
-            .map_err(|_| Error::ResultChannelClosed)?;
+            .map_err(|_| GattError::DisconnectedWhileOperation)?;
 
         let result = match select(discovery.run(), disc_sub.next_message()).await {
             Either::First(r) => r,
             Either::Second(WaitResult::Message(())) | Either::Second(WaitResult::Lagged(_)) => {
-                return Err(Error::DisconnectedWhileOperation);
+                return Err(GattError::DisconnectedWhileOperation);
             }
         };
 
@@ -199,13 +199,13 @@ impl<M: RawMutex> Peripheral<M> {
     }
 
     /// Discover all services and replace the cache.
-    pub async fn discover_all_services(&self) -> Result<()> {
+    pub async fn discover_all_services(&self) -> GattResult<()> {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::NotConnected);
+            return Err(GattError::NotConnected);
         };
 
         let discovery = ServiceDiscovery::new(conn_handle);
@@ -213,12 +213,12 @@ impl<M: RawMutex> Peripheral<M> {
         let mut disc_sub = self
             .disconnect_pub
             .subscriber()
-            .map_err(|_| Error::ResultChannelClosed)?;
+            .map_err(|_| GattError::DisconnectedWhileOperation)?;
 
         let result = match select(discovery.run(), disc_sub.next_message()).await {
             Either::First(r) => r,
             Either::Second(WaitResult::Message(())) | Either::Second(WaitResult::Lagged(_)) => {
-                return Err(Error::DisconnectedWhileOperation);
+                return Err(GattError::DisconnectedWhileOperation);
             }
         };
 
@@ -233,25 +233,25 @@ impl<M: RawMutex> Peripheral<M> {
         self.services.lock(|s| s.iter().cloned().collect())
     }
 
-    pub async fn read(&self, characteristic: &Characteristic) -> Result<bytes::Bytes> {
+    pub async fn read(&self, characteristic: &Characteristic) -> GattResult<bytes::Bytes> {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::ReadCharacteristic("Not connected".into()));
+            return Err(GattError::NotConnected);
         };
 
         read_attribute(conn_handle, characteristic.handle()).await
     }
 
-    pub async fn read_descriptor(&self, descriptor: &Descriptor) -> Result<bytes::Bytes> {
+    pub async fn read_descriptor(&self, descriptor: &Descriptor) -> GattResult<bytes::Bytes> {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::ReadCharacteristic("Not connected".into()));
+            return Err(GattError::NotConnected);
         };
 
         read_attribute(conn_handle, descriptor.handle()).await
@@ -262,13 +262,13 @@ impl<M: RawMutex> Peripheral<M> {
         characteristic: &Characteristic,
         data: &[u8],
         response: bool,
-    ) -> Result {
+    ) -> GattResult {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::ReadCharacteristic("Not connected".into()));
+            return Err(GattError::NotConnected);
         };
 
         write_attribute(
@@ -285,13 +285,13 @@ impl<M: RawMutex> Peripheral<M> {
         descriptor: &Descriptor,
         data: &[u8],
         response: bool,
-    ) -> Result {
+    ) -> GattResult {
         let conn_handle = self.connection_state.lock(|s| match *s {
             ConnectionState::Connected(h) => Some(h),
             ConnectionState::Disconnected => None,
         });
         let Some(conn_handle) = conn_handle else {
-            return Err(Error::ReadCharacteristic("Not connected".into()));
+            return Err(GattError::NotConnected);
         };
 
         write_attribute(
@@ -308,10 +308,10 @@ impl<M: RawMutex> Peripheral<M> {
     /// The returned subscriber borrows `self` (lifetime tied to `&self`).
     pub fn subscribe(
         &self,
-    ) -> core::result::Result<Subscriber<'_, M, (u16, Vec<u8>), 16, 4, 1>, Error> {
+    ) -> core::result::Result<Subscriber<'_, M, (u16, Vec<u8>), 16, 4, 1>, InternalError> {
         self.subscription_pub
             .subscriber()
-            .map_err(|_| Error::ResultChannelClosed)
+            .map_err(|_| InternalError::ChannelClosed)
     }
 
     unsafe extern "C" fn gap_event_handler(
@@ -342,7 +342,7 @@ impl<M: RawMutex> Peripheral<M> {
             return 0;
         }
 
-        let result = return_code_to_result(error.status as u32, ()).map_err(Error::ExchangeMtu);
+        let result = return_code_to_result(error.status as u32, ()).map_err(GattError::MtuExchangeFailed);
 
         if result.is_ok() {
             unsafe { operation.context().lock_mut(|v| *v = mtu) };
@@ -367,7 +367,7 @@ impl<M: RawMutex> Drop for Peripheral<M> {
 
 fn handle_connect<M: RawMutex>(peripheral: &Peripheral<M>, event: &bindings::ble_gap_event) -> i32 {
     let connect = unsafe { &event.__bindgen_anon_1.connect };
-    let result = return_code_to_result(connect.status as u32, ()).map_err(Error::Connect);
+    let result = return_code_to_result(connect.status as u32, ()).map_err(ConnectError::GapConnectFailed);
 
     if result.is_ok() {
         let already = peripheral
@@ -432,7 +432,7 @@ fn handle_disconnect<M: RawMutex>(
         unsafe { peripheral.services.lock_mut(|s| s.clear()) };
 
         if let Ok(p) = peripheral.disconnect_pub.publisher() {
-            p.publish(());
+            p.publish_immediate(());
         }
     } else {
         log::debug!("Not connected, ignoring disconnect event");

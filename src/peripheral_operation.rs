@@ -6,7 +6,7 @@ use embassy_sync::{
     signal::Signal,
 };
 
-use crate::{error::Result, data::ConnectionHandle};
+use crate::{error::GattResult, data::ConnectionHandle};
 
 /// Represents an operation on a peripheral device.
 ///
@@ -15,7 +15,7 @@ pub struct PeripheralOperation<C, M: RawMutex> {
     conn_handle: ConnectionHandle,
 
     // One-shot completion signaling.
-    finished: Arc<Signal<M, Result>>,
+    finished: Arc<Signal<M, GattResult>>,
     finished_sent: AtomicBool,
 
     // Shared operation context.
@@ -23,7 +23,7 @@ pub struct PeripheralOperation<C, M: RawMutex> {
 }
 
 impl<C, M: RawMutex> PeripheralOperation<C, M> {
-    fn new(conn_handle: ConnectionHandle, finished: Arc<Signal<M, Result>>, context: C) -> Self {
+    fn new(conn_handle: ConnectionHandle, finished: Arc<Signal<M, GattResult>>, context: C) -> Self {
         Self {
             conn_handle,
             finished,
@@ -36,7 +36,7 @@ impl<C, M: RawMutex> PeripheralOperation<C, M> {
     ///
     /// Safe to call from synchronous contexts (e.g. event handlers), provided the chosen `M`
     /// is appropriate for that context.
-    pub fn send_finished(&self, result: Result) {
+    pub fn send_finished(&self, result: GattResult) {
         // Ensure "oneshot" semantics.
         if self.finished_sent.swap(true, Ordering::AcqRel) {
             log::error!("Finished already sent");
@@ -64,16 +64,16 @@ impl<C, M: RawMutex> PeripheralOperation<C, M> {
 
 /// Represents a handle to a peripheral operation.
 pub struct PeripheralOperationHandle<M: RawMutex> {
-    finished: Arc<Signal<M, Result>>,
+    finished: Arc<Signal<M, GattResult>>,
 }
 
 impl<M: RawMutex> PeripheralOperationHandle<M> {
-    fn new(finished: Arc<Signal<M, Result>>) -> Self {
+    fn new(finished: Arc<Signal<M, GattResult>>) -> Self {
         Self { finished }
     }
 
     /// Awaits the completion of the operation.
-    pub async fn join(self) -> Result<()> {
+    pub async fn join(self) -> GattResult<()> {
         self.finished.wait().await
     }
 }
@@ -83,7 +83,7 @@ pub fn peripheral_operation<C, M: RawMutex>(
     conn_handle: ConnectionHandle,
     context: C,
 ) -> (PeripheralOperation<C, M>, PeripheralOperationHandle<M>) {
-    let finished = Arc::new(Signal::<M, Result>::new());
+    let finished = Arc::new(Signal::<M, GattResult>::new());
 
     (
         PeripheralOperation::new(conn_handle, finished.clone(), context),
