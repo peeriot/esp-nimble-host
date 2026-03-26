@@ -7,6 +7,7 @@ use embassy_sync::{
     pubsub::{PubSubChannel, Subscriber, WaitResult},
     signal::Signal,
 };
+use portable_atomic::{AtomicU16, Ordering};
 
 use uuid::Uuid;
 
@@ -25,80 +26,107 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as DefaultRawMute
 /// We can only make one connection attempt at the same time.
 static CONNECT_LOCK: AsyncMutex<DefaultRawMutex, ()> = AsyncMutex::new(());
 
-#[derive(Debug, Clone)]
-enum ConnectionState {
-    Disconnected,
-    Connected(u16),
+/// Sentinel value: no active connection.
+const CONN_HANDLE_NONE: u16 = u16::MAX;
+
+/// Shared state for a peripheral, leaked to `'static`.
+///
+/// Lives as long as the program. The GAP callback holds a raw pointer to this,
+/// so it must be at a stable address (Box::leak guarantees this).
+struct PeripheralInner<M: RawMutex + 'static> {
+    addr: BleAddr,
+
+    /// Current connection handle, or `CONN_HANDLE_NONE` if disconnected.
+    conn_handle: AtomicU16,
+
+    /// One-shot signal for the current connect attempt.
+    /// Written by `connect()`, consumed by the GAP callback.
+    /// Safety: only mutated under CONNECT_LOCK (one attempt at a time),
+    /// and the GAP callback only takes (not writes).
+    connect_signal: BlockingMutex<M, Option<Arc<Signal<M, ConnectResult>>>>,
+
+    /// Disconnect notifications (multi-subscriber).
+    disconnect_pub: PubSubChannel<M, (), 4, 4, 1>,
+
+    /// Discovered services cache.
+    /// Safety: mutated from discovery (async, one at a time) and cleared
+    /// from the disconnect callback (NimBLE host task). Both are serialised
+    /// by the connection lifecycle — you can't discover while disconnected.
+    services: BlockingMutex<M, BTreeSet<Service>>,
+
+    /// Notifications/indications stream: (attr_handle, payload).
+    subscription_pub: PubSubChannel<M, (u16, Vec<u8>), 16, 4, 1>,
 }
 
-impl ConnectionState {
-    #[must_use]
-    fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected(..))
+impl<M: RawMutex + 'static> PeripheralInner<M> {
+    /// Read the current connection handle, or `None` if disconnected.
+    fn conn_handle(&self) -> Option<u16> {
+        let h = self.conn_handle.load(Ordering::Acquire);
+        if h == CONN_HANDLE_NONE { None } else { Some(h) }
     }
 }
 
-#[derive(Clone)]
-pub struct Peripheral<M: RawMutex = DefaultRawMutex> {
-    addr: BleAddr,
-
-    connection_state: Arc<BlockingMutex<M, ConnectionState>>,
-
-    /// Slot that holds the current connect-attempt signal, if any.
-    connect_signal: Arc<BlockingMutex<M, Option<Arc<Signal<M, ConnectResult>>>>>,
-
-    /// Disconnect notifications (multi-subscriber).
-    disconnect_pub: Arc<PubSubChannel<M, (), 4, 4, 1>>,
-
-    /// Discovered services cache.
-    services: Arc<BlockingMutex<M, BTreeSet<Service>>>,
-
-    /// Notifications/indications stream: (attr_handle, payload).
-    subscription_pub: Arc<PubSubChannel<M, (u16, Vec<u8>), 16, 4, 1>>,
+/// Handle to a BLE peripheral device.
+///
+/// Lightweight — holds a `&'static` reference to leaked inner state.
+/// No heap allocation per clone.
+pub struct Peripheral<M: RawMutex + 'static = DefaultRawMutex> {
+    inner: &'static PeripheralInner<M>,
 }
 
-impl<M: RawMutex> Peripheral<M> {
+// Manual Clone: just copy the reference.
+impl<M: RawMutex + 'static> Clone for Peripheral<M> {
+    fn clone(&self) -> Self {
+        Self { inner: self.inner }
+    }
+}
+
+impl<M: RawMutex + 'static> Peripheral<M> {
     pub fn new(addr: BleAddr) -> Self {
-        Self {
+        let inner: &'static PeripheralInner<M> = Box::leak(Box::new(PeripheralInner {
             addr,
-            connection_state: Arc::new(BlockingMutex::new(ConnectionState::Disconnected)),
-            connect_signal: Arc::new(BlockingMutex::new(None)),
-            disconnect_pub: Arc::new(PubSubChannel::new()),
-            services: Arc::new(BlockingMutex::new(BTreeSet::new())),
-            subscription_pub: Arc::new(PubSubChannel::new()),
-        }
+            conn_handle: AtomicU16::new(CONN_HANDLE_NONE),
+            connect_signal: BlockingMutex::new(None),
+            disconnect_pub: PubSubChannel::new(),
+            services: BlockingMutex::new(BTreeSet::new()),
+            subscription_pub: PubSubChannel::new(),
+        }));
+
+        Self { inner }
     }
 
     pub async fn connect(&self) -> ConnectResult {
-        log::info!("Connecting to peripheral at {:?}", self.addr);
+        log::info!("Connecting to peripheral at {:?}", self.inner.addr);
 
         let _guard = CONNECT_LOCK.lock().await;
-        log::info!("Acquired connect lock for {:?}", self.addr);
+        log::info!("Acquired connect lock for {:?}", self.inner.addr);
 
         let attempt = Arc::new(Signal::<M, ConnectResult>::new());
+        // Safety: we hold CONNECT_LOCK, so no concurrent connect() can race.
         unsafe {
-            self.connect_signal.lock_mut(|slot| {
+            self.inner.connect_signal.lock_mut(|slot| {
                 *slot = Some(attempt.clone());
             })
         };
 
-        let addr = self.addr.clone().into();
+        let addr = self.inner.addr.clone().into();
         ble_gap_connect(
             0,
             &addr,
             1800,
             None,
             Some(Self::gap_event_handler),
-            self as *const Self as _,
+            self.inner as *const PeripheralInner<M> as _,
         )
         .map_err(ConnectError::GapConnectFailed)?;
 
         let mut disc_sub = self
+            .inner
             .disconnect_pub
             .subscriber()
             .map_err(|_| ConnectError::DisconnectedWhileOperation)?;
 
-        log::info!("Waiting for connection result for {:?}", self.addr);
+        log::info!("Waiting for connection result for {:?}", self.inner.addr);
 
         match select(attempt.wait(), disc_sub.next_message()).await {
             Either::First(result) => result,
@@ -111,17 +139,13 @@ impl<M: RawMutex> Peripheral<M> {
     pub async fn disconnect(&self) -> ConnectResult {
         log::debug!("Disconnecting");
 
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             log::debug!("Not connected, nothing to disconnect");
             return Ok(());
         };
 
         let mut disc_sub = self
+            .inner
             .disconnect_pub
             .subscriber()
             .map_err(|_| ConnectError::DisconnectedWhileOperation)?;
@@ -138,16 +162,11 @@ impl<M: RawMutex> Peripheral<M> {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.connection_state.lock(|s| s.is_connected())
+        self.inner.conn_handle().is_some()
     }
 
     pub async fn exchange_mtu(&self) -> GattResult {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
@@ -165,17 +184,14 @@ impl<M: RawMutex> Peripheral<M> {
 
     /// Discover a specific service by UUID and cache it in `self.services`.
     pub async fn discover_service_by_uuid(&self, uuid: &Uuid) -> GattResult<()> {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
         let discovery = ServiceCharacteristicsDiscovery::new(conn_handle, uuid);
 
         let mut disc_sub = self
+            .inner
             .disconnect_pub
             .subscriber()
             .map_err(|_| GattError::DisconnectedWhileOperation)?;
@@ -188,8 +204,9 @@ impl<M: RawMutex> Peripheral<M> {
         };
 
         if let Some(service) = result? {
+            // Safety: discovery is serialised by connection lifecycle.
             unsafe {
-                self.services.lock_mut(|s| {
+                self.inner.services.lock_mut(|s| {
                     s.insert(service);
                 })
             };
@@ -200,17 +217,14 @@ impl<M: RawMutex> Peripheral<M> {
 
     /// Discover all services and replace the cache.
     pub async fn discover_all_services(&self) -> GattResult<()> {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
         let discovery = ServiceDiscovery::new(conn_handle);
 
         let mut disc_sub = self
+            .inner
             .disconnect_pub
             .subscriber()
             .map_err(|_| GattError::DisconnectedWhileOperation)?;
@@ -223,22 +237,19 @@ impl<M: RawMutex> Peripheral<M> {
         };
 
         let services = result?;
-        unsafe { self.services.lock_mut(|s| *s = services) };
+        // Safety: discovery is serialised by connection lifecycle.
+        unsafe { self.inner.services.lock_mut(|s| *s = services) };
 
         Ok(())
     }
 
     /// Returns a snapshot of the cached services.
-    pub async fn services(&self) -> BTreeSet<Service> {
-        self.services.lock(|s| s.iter().cloned().collect())
+    pub fn services(&self) -> BTreeSet<Service> {
+        self.inner.services.lock(|s| s.iter().cloned().collect())
     }
 
     pub async fn read(&self, characteristic: &Characteristic) -> GattResult<bytes::Bytes> {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
@@ -246,11 +257,7 @@ impl<M: RawMutex> Peripheral<M> {
     }
 
     pub async fn read_descriptor(&self, descriptor: &Descriptor) -> GattResult<bytes::Bytes> {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
@@ -263,11 +270,7 @@ impl<M: RawMutex> Peripheral<M> {
         data: &[u8],
         response: bool,
     ) -> GattResult {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
@@ -286,11 +289,7 @@ impl<M: RawMutex> Peripheral<M> {
         data: &[u8],
         response: bool,
     ) -> GattResult {
-        let conn_handle = self.connection_state.lock(|s| match *s {
-            ConnectionState::Connected(h) => Some(h),
-            ConnectionState::Disconnected => None,
-        });
-        let Some(conn_handle) = conn_handle else {
+        let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
@@ -304,12 +303,11 @@ impl<M: RawMutex> Peripheral<M> {
     }
 
     /// Subscribe to notifications/indications.
-    ///
-    /// The returned subscriber borrows `self` (lifetime tied to `&self`).
     pub fn subscribe(
         &self,
     ) -> core::result::Result<Subscriber<'_, M, (u16, Vec<u8>), 16, 4, 1>, InternalError> {
-        self.subscription_pub
+        self.inner
+            .subscription_pub
             .subscriber()
             .map_err(|_| InternalError::ChannelClosed)
     }
@@ -318,13 +316,13 @@ impl<M: RawMutex> Peripheral<M> {
         event: *mut bindings::ble_gap_event,
         param: *mut core::ffi::c_void,
     ) -> i32 {
-        let peripheral = unsafe { &*(param as *const Self) };
+        let inner = unsafe { &*(param as *const PeripheralInner<M>) };
         let event = unsafe { *event };
 
         match event.type_ as u32 {
-            bindings::BLE_GAP_EVENT_CONNECT => handle_connect(peripheral, &event),
-            bindings::BLE_GAP_EVENT_DISCONNECT => handle_disconnect(peripheral, &event),
-            bindings::BLE_GAP_EVENT_NOTIFY_RX => handle_notify_rx(peripheral, &event),
+            bindings::BLE_GAP_EVENT_CONNECT => handle_connect(inner, &event),
+            bindings::BLE_GAP_EVENT_DISCONNECT => handle_disconnect(inner, &event),
+            bindings::BLE_GAP_EVENT_NOTIFY_RX => handle_notify_rx(inner, &event),
             _ => 0,
         }
     }
@@ -345,6 +343,7 @@ impl<M: RawMutex> Peripheral<M> {
         let result = return_code_to_result(error.status as u32, ()).map_err(GattError::MtuExchangeFailed);
 
         if result.is_ok() {
+            // Safety: callback is single-threaded (NimBLE host task).
             unsafe { operation.context().lock_mut(|v| *v = mtu) };
         }
 
@@ -353,46 +352,29 @@ impl<M: RawMutex> Peripheral<M> {
     }
 
     pub fn addr(&self) -> &BleAddr {
-        &self.addr
+        &self.inner.addr
     }
 }
 
-impl<M: RawMutex> Drop for Peripheral<M> {
-    fn drop(&mut self) {
-        // Same as before: keep Drop lock-free / best-effort.
-        // If you want termination in Drop, add a cached conn_handle (AtomicU16 + flag)
-        // updated in connect/disconnect handlers.
-    }
-}
-
-fn handle_connect<M: RawMutex>(peripheral: &Peripheral<M>, event: &bindings::ble_gap_event) -> i32 {
+fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble_gap_event) -> i32 {
     let connect = unsafe { &event.__bindgen_anon_1.connect };
     let result = return_code_to_result(connect.status as u32, ()).map_err(ConnectError::GapConnectFailed);
 
     if result.is_ok() {
-        let already = peripheral
-            .connection_state
-            .lock(|s| matches!(*s, ConnectionState::Connected(_)));
+        let current = inner.conn_handle.load(Ordering::Acquire);
 
-        if already {
-            peripheral.connection_state.lock(|s| {
-                if let ConnectionState::Connected(existing) = *s {
-                    log::info!("Already connected with handle {existing}, ignoring connect event");
-                }
-            });
+        if current != CONN_HANDLE_NONE {
+            log::info!("Already connected with handle {current}, ignoring connect event");
         } else {
             log::info!("Connected with handle {}", connect.conn_handle);
-            unsafe {
-                peripheral
-                    .connection_state
-                    .lock_mut(|s| *s = ConnectionState::Connected(connect.conn_handle))
-            };
+            inner.conn_handle.store(connect.conn_handle, Ordering::Release);
         }
     } else {
         log::error!("Failed to connect: {:?}", result.as_ref().unwrap_err());
     }
 
-    let attempt = unsafe { peripheral.connect_signal.lock_mut(|slot| slot.take()) };
+    // Safety: GAP callback is single-threaded (NimBLE host task).
+    let attempt = unsafe { inner.connect_signal.lock_mut(|slot| slot.take()) };
     if let Some(sig) = attempt {
         sig.signal(result);
     } else {
@@ -403,35 +385,32 @@ fn handle_connect<M: RawMutex>(peripheral: &Peripheral<M>, event: &bindings::ble
 }
 
 fn handle_disconnect<M: RawMutex>(
-    peripheral: &Peripheral<M>,
+    inner: &PeripheralInner<M>,
     event: &bindings::ble_gap_event,
 ) -> i32 {
     let disconnect = unsafe { &event.__bindgen_anon_1.disconnect };
 
-    let state = peripheral.connection_state.lock(|s| s.clone());
+    let current = inner.conn_handle.load(Ordering::Acquire);
 
-    if let ConnectionState::Connected(conn_handle) = state {
-        log::debug!("Disconnected from handle {}", conn_handle);
+    if current != CONN_HANDLE_NONE {
+        log::debug!("Disconnected from handle {}", current);
 
-        if conn_handle != disconnect.conn.conn_handle {
+        if current != disconnect.conn.conn_handle {
             log::warn!(
                 "Received disconnect for handle {}, current handle is {}",
                 disconnect.conn.conn_handle,
-                conn_handle
+                current
             );
             return 0;
         }
 
-        unsafe {
-            peripheral
-                .connection_state
-                .lock_mut(|s| *s = ConnectionState::Disconnected)
-        };
+        inner.conn_handle.store(CONN_HANDLE_NONE, Ordering::Release);
 
-        // Clear cached services on disconnect (matches typical expectations).
-        unsafe { peripheral.services.lock_mut(|s| s.clear()) };
+        // Clear cached services on disconnect.
+        // Safety: NimBLE host task is single-threaded.
+        unsafe { inner.services.lock_mut(|s| s.clear()) };
 
-        if let Ok(p) = peripheral.disconnect_pub.publisher() {
+        if let Ok(p) = inner.disconnect_pub.publisher() {
             p.publish_immediate(());
         }
     } else {
@@ -442,7 +421,7 @@ fn handle_disconnect<M: RawMutex>(
 }
 
 fn handle_notify_rx<M: RawMutex>(
-    peripheral: &Peripheral<M>,
+    inner: &PeripheralInner<M>,
     event: &bindings::ble_gap_event,
 ) -> i32 {
     let notify_rx = unsafe { &event.__bindgen_anon_1.notify_rx };
@@ -459,9 +438,7 @@ fn handle_notify_rx<M: RawMutex>(
         }
     };
 
-    if let Ok(p) = peripheral.subscription_pub.publisher() {
-        // If the channel is full, PubSubChannel will drop/lag depending on config;
-        // keep it best-effort like broadcast.
+    if let Ok(p) = inner.subscription_pub.publisher() {
         p.publish_immediate((attr_handle, payload));
     }
 
