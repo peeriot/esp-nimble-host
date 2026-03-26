@@ -39,16 +39,33 @@ impl ServiceDiscovery {
 
             *service.characteristics_mut() = chars;
 
-            let end_handle = service.end_handle();
-            for ch in service.characteristics_mut().iter_mut() {
+            let svc_end = service.end_handle();
+            let char_count = service.characteristics().len();
+            for i in 0..char_count {
+                // Descriptor range: after the characteristic value handle,
+                // up to the next characteristic's definition handle - 1
+                // (or the service end handle for the last characteristic).
+                // NimBLE searches from start_handle + 1, so start must be < end.
+                let chr_val_handle = service.characteristics()[i].handle();
+                let desc_end = if i + 1 < char_count {
+                    service.characteristics()[i + 1].def_handle() - 1
+                } else {
+                    svc_end
+                };
+
+                // Skip if no handle space for descriptors
+                if chr_val_handle >= desc_end {
+                    continue;
+                }
+
                 let descriptors = nimble_discover_characteristic_descriptors(
                     self.conn_handle,
-                    ch.def_handle(),
-                    end_handle,
+                    chr_val_handle,
+                    desc_end,
                 )
                 .await?;
 
-                *ch.descriptors_mut() = descriptors;
+                *service.characteristics_mut()[i].descriptors_mut() = descriptors;
             }
         }
 
@@ -88,16 +105,28 @@ impl ServiceCharacteristicsDiscovery {
 
         *service.characteristics_mut() = chars;
 
-        let end_handle = service.end_handle();
-        for ch in service.characteristics_mut().iter_mut() {
+        let svc_end = service.end_handle();
+        let char_count = service.characteristics().len();
+        for i in 0..char_count {
+            let chr_val_handle = service.characteristics()[i].handle();
+            let desc_end = if i + 1 < char_count {
+                service.characteristics()[i + 1].def_handle() - 1
+            } else {
+                svc_end
+            };
+
+            if chr_val_handle >= desc_end {
+                continue;
+            }
+
             let descriptors = nimble_discover_characteristic_descriptors(
                 self.conn_handle,
-                ch.def_handle(),
-                end_handle,
+                chr_val_handle,
+                desc_end,
             )
             .await?;
 
-            *ch.descriptors_mut() = descriptors;
+            *service.characteristics_mut()[i].descriptors_mut() = descriptors;
         }
 
         Ok(Some(service))
