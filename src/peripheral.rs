@@ -36,6 +36,14 @@ static CONNECT_LOCK: AsyncMutex<DefaultRawMutex, ()> = AsyncMutex::new(());
 /// Sentinel value: no active connection.
 const CONN_HANDLE_NONE: u16 = u16::MAX;
 
+/// Connection-establishment timeout passed to `ble_gap_connect`, in milliseconds.
+///
+/// On expiry NimBLE ends the procedure itself and reports a CONNECT event with
+/// `BLE_HS_ETIMEOUT`, which we surface as [`ConnectError::Timeout`]. We rely on this
+/// stack-level timeout rather than a separate Rust-side timer. `0` would mean
+/// "no timeout" (attempt forever).
+const CONNECT_TIMEOUT_MS: u32 = 1800;
+
 /// Shared state for a peripheral, leaked to `'static`.
 ///
 /// Lives as long as the program. The GAP callback holds a raw pointer to this,
@@ -116,7 +124,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         ble_gap_connect(
             0,
             &addr,
-            1800,
+            CONNECT_TIMEOUT_MS,
             None,
             Some(Self::gap_event_handler),
             self.inner as *const PeripheralInner<M> as _,
@@ -356,7 +364,13 @@ impl<M: RawMutex + 'static> Peripheral<M> {
 
 fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble_gap_event) -> i32 {
     let connect = unsafe { &event.__bindgen_anon_1.connect };
-    let result = return_code_to_result(connect.status as u32, ()).map_err(ConnectError::GapConnectFailed);
+    // A connect-duration expiry comes back as BLE_HS_ETIMEOUT; surface it as the
+    // semantic `Timeout` so callers can match it without inspecting the raw code.
+    let result = match return_code_to_result(connect.status as u32, ()) {
+        Ok(()) => Ok(()),
+        Err(NimbleError::Timeout) => Err(ConnectError::Timeout),
+        Err(e) => Err(ConnectError::GapConnectFailed(e)),
+    };
 
     if result.is_ok() {
         let current = inner.conn_handle.load(Ordering::Acquire);
