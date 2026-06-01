@@ -1,4 +1,5 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::cell::RefCell;
 
 use embassy_futures::select::{Either, select};
 use embassy_sync::{
@@ -39,20 +40,20 @@ struct PeripheralInner<M: RawMutex + 'static> {
     /// Current connection handle, or `CONN_HANDLE_NONE` if disconnected.
     conn_handle: AtomicU16,
 
-    /// One-shot signal for the current connect attempt.
-    /// Written by `connect()`, consumed by the GAP callback.
-    /// Safety: only mutated under CONNECT_LOCK (one attempt at a time),
-    /// and the GAP callback only takes (not writes).
-    connect_signal: BlockingMutex<M, Option<Arc<Signal<M, ConnectResult>>>>,
+    /// Result of the current connect attempt.
+    /// `connect()` calls `reset()` then `wait()`; the GAP callback signals it.
+    /// CONNECT_LOCK serialises attempts, so a single permanent signal suffices
+    /// (no per-attempt allocation).
+    connect_result: Signal<M, ConnectResult>,
 
     /// Disconnect notifications (multi-subscriber).
     disconnect_pub: PubSubChannel<M, (), 4, 4, 1>,
 
     /// Discovered services cache.
-    /// Safety: mutated from discovery (async, one at a time) and cleared
-    /// from the disconnect callback (NimBLE host task). Both are serialised
-    /// by the connection lifecycle — you can't discover while disconnected.
-    services: BlockingMutex<M, Vec<Service>>,
+    /// Mutated from discovery (async, one at a time) and cleared from the
+    /// disconnect callback (NimBLE host task); the `Mutex` serialises the two
+    /// and `RefCell` provides safe interior mutability.
+    services: BlockingMutex<M, RefCell<Vec<Service>>>,
 
     /// Notifications/indications stream: (attr_handle, payload).
     subscription_pub: PubSubChannel<M, (u16, Vec<u8>), 16, 4, 1>,
@@ -86,9 +87,9 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         let inner: &'static PeripheralInner<M> = Box::leak(Box::new(PeripheralInner {
             addr,
             conn_handle: AtomicU16::new(CONN_HANDLE_NONE),
-            connect_signal: BlockingMutex::new(None),
+            connect_result: Signal::new(),
             disconnect_pub: PubSubChannel::new(),
-            services: BlockingMutex::new(Vec::new()),
+            services: BlockingMutex::new(RefCell::new(Vec::new())),
             subscription_pub: PubSubChannel::new(),
         }));
 
@@ -101,13 +102,9 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         let _guard = CONNECT_LOCK.lock().await;
         log::info!("Acquired connect lock for {:?}", self.inner.addr);
 
-        let attempt = Arc::new(Signal::<M, ConnectResult>::new());
-        // Safety: we hold CONNECT_LOCK, so no concurrent connect() can race.
-        unsafe {
-            self.inner.connect_signal.lock_mut(|slot| {
-                *slot = Some(attempt.clone());
-            })
-        };
+        // We hold CONNECT_LOCK, so no concurrent connect() can race. Clear any
+        // stale result before arming the GAP connect.
+        self.inner.connect_result.reset();
 
         let addr = self.inner.addr.clone().into();
         ble_gap_connect(
@@ -128,7 +125,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
 
         log::info!("Waiting for connection result for {:?}", self.inner.addr);
 
-        match select(attempt.wait(), disc_sub.next_message()).await {
+        match select(self.inner.connect_result.wait(), disc_sub.next_message()).await {
             Either::First(result) => result,
             Either::Second(WaitResult::Message(())) | Either::Second(WaitResult::Lagged(_)) => {
                 Err(ConnectError::DisconnectedWhileOperation)
@@ -204,12 +201,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         };
 
         if let Some(service) = result? {
-            // Safety: discovery is serialised by connection lifecycle.
-            unsafe {
-                self.inner.services.lock_mut(|s| {
-                    s.push(service);
-                })
-            };
+            self.inner.services.lock(|s| s.borrow_mut().push(service));
         }
 
         Ok(())
@@ -237,15 +229,16 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         };
 
         let services = result?;
-        // Safety: discovery is serialised by connection lifecycle.
-        unsafe { self.inner.services.lock_mut(|s| *s = services) };
+        self.inner
+            .services
+            .lock(|s| *s.borrow_mut() = services);
 
         Ok(())
     }
 
     /// Returns a snapshot of the cached services.
     pub fn services(&self) -> Vec<Service> {
-        self.inner.services.lock(|s| s.clone())
+        self.inner.services.lock(|s| s.borrow().clone())
     }
 
     pub async fn read(&self, characteristic: &Characteristic) -> GattResult<bytes::Bytes> {
@@ -343,8 +336,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         let result = return_code_to_result(error.status as u32, ()).map_err(GattError::MtuExchangeFailed);
 
         if result.is_ok() {
-            // Safety: callback is single-threaded (NimBLE host task).
-            unsafe { operation.context().lock_mut(|v| *v = mtu) };
+            operation.context().lock(|v| *v.borrow_mut() = mtu);
         }
 
         operation.send_finished(result);
@@ -373,13 +365,7 @@ fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble
         log::error!("Failed to connect: {:?}", result.as_ref().unwrap_err());
     }
 
-    // Safety: GAP callback is single-threaded (NimBLE host task).
-    let attempt = unsafe { inner.connect_signal.lock_mut(|slot| slot.take()) };
-    if let Some(sig) = attempt {
-        sig.signal(result);
-    } else {
-        log::error!("No connect attempt signal present");
-    }
+    inner.connect_result.signal(result);
 
     0
 }
@@ -407,8 +393,7 @@ fn handle_disconnect<M: RawMutex>(
         inner.conn_handle.store(CONN_HANDLE_NONE, Ordering::Release);
 
         // Clear cached services on disconnect.
-        // Safety: NimBLE host task is single-threaded.
-        unsafe { inner.services.lock_mut(|s| s.clear()) };
+        inner.services.lock(|s| s.borrow_mut().clear());
 
         if let Ok(p) = inner.disconnect_pub.publisher() {
             p.publish_immediate(());

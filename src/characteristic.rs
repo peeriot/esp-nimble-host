@@ -143,11 +143,9 @@ where
 
     match ble_hs_mbuf_to_flat(attr.om) {
         Ok(om_data) => {
-            unsafe {
-                operation
-                    .context()
-                    .lock_mut(|ctx| *ctx = Some(Bytes::from(om_data)))
-            };
+            operation
+                .context()
+                .lock(|ctx| *ctx.borrow_mut() = Some(Bytes::from(om_data)));
             operation.send_finished(Ok(()));
         }
         Err(e) => {

@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::{
@@ -18,8 +19,10 @@ pub struct PeripheralOperation<C, M: RawMutex> {
     finished: Arc<Signal<M, GattResult>>,
     finished_sent: AtomicBool,
 
-    // Shared operation context.
-    context: Arc<Mutex<M, C>>,
+    // Shared operation context. `RefCell` provides safe interior mutability;
+    // the surrounding `Mutex` serialises the callback (host task) against the
+    // awaiter, so `borrow_mut()` never overlaps in normal operation.
+    context: Arc<Mutex<M, RefCell<C>>>,
 }
 
 impl<C, M: RawMutex> PeripheralOperation<C, M> {
@@ -28,7 +31,7 @@ impl<C, M: RawMutex> PeripheralOperation<C, M> {
             conn_handle,
             finished,
             finished_sent: AtomicBool::new(false),
-            context: Arc::new(Mutex::new(context)),
+            context: Arc::new(Mutex::new(RefCell::new(context))),
         }
     }
 
@@ -53,11 +56,13 @@ impl<C, M: RawMutex> PeripheralOperation<C, M> {
 
     /// Takes ownership of the context, returning it only if this is the last `Arc`.
     pub fn take_context(self) -> Option<C> {
-        Arc::try_unwrap(self.context).ok().map(|m| m.into_inner())
+        Arc::try_unwrap(self.context)
+            .ok()
+            .map(|m| m.into_inner().into_inner())
     }
 
     /// Returns a reference to the context mutex.
-    pub fn context(&self) -> &Mutex<M, C> {
+    pub fn context(&self) -> &Mutex<M, RefCell<C>> {
         &self.context
     }
 }

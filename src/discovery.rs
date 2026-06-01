@@ -203,11 +203,10 @@ where
         let service = unsafe { &*service };
         match nimble_uuid_to_uuid(&service.uuid) {
             Ok(uuid) => {
-                unsafe {
-                    operation.context().lock_mut(|v| {
-                        v.push(Service::new(uuid, service.start_handle, service.end_handle))
-                    })
-                };
+                operation.context().lock(|v| {
+                    v.borrow_mut()
+                        .push(Service::new(uuid, service.start_handle, service.end_handle))
+                });
             }
             Err(e) => {
                 operation.send_finished(Err(e.into()));
@@ -280,11 +279,10 @@ where
         let chr = unsafe { &*chr };
         match nimble_uuid_to_uuid(&chr.uuid) {
             Ok(uuid) => {
-                unsafe {
-                    operation.context().lock_mut(|v| {
-                        v.push(Characteristic::new(uuid, chr.val_handle, chr.def_handle));
-                    })
-                };
+                operation.context().lock(|v| {
+                    v.borrow_mut()
+                        .push(Characteristic::new(uuid, chr.val_handle, chr.def_handle));
+                });
             }
             Err(e) => {
                 operation.send_finished(Err(e.into()));
@@ -351,11 +349,9 @@ where
         let dsc = unsafe { &*dsc };
         match nimble_uuid_to_uuid(&dsc.uuid) {
             Ok(uuid) => {
-                unsafe {
-                    operation.context().lock_mut(|v| {
-                        v.push(Descriptor::new(uuid, dsc.handle));
-                    })
-                };
+                operation.context().lock(|v| {
+                    v.borrow_mut().push(Descriptor::new(uuid, dsc.handle));
+                });
             }
             Err(e) => {
                 operation.send_finished(Err(e.into()));
