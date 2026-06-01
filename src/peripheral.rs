@@ -24,7 +24,13 @@ use crate::{
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as DefaultRawMutex;
 
-/// We can only make one connection attempt at the same time.
+/// Serialises connection *establishment* across all `Peripheral`s.
+///
+/// The controller cannot have two connection attempts in flight at once — a second
+/// `ble_gap_connect()` while one is pending fails immediately. This lock makes
+/// concurrent `connect()` calls (e.g. to different peripherals) queue instead of
+/// erroring. It does NOT limit how many connections can be *held* simultaneously;
+/// that is governed by `max_connections` in nimble-config.toml.
 static CONNECT_LOCK: AsyncMutex<DefaultRawMutex, ()> = AsyncMutex::new(());
 
 /// Sentinel value: no active connection.
