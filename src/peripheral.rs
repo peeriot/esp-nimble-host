@@ -44,6 +44,17 @@ const CONN_HANDLE_NONE: u16 = u16::MAX;
 /// "no timeout" (attempt forever).
 const CONNECT_TIMEOUT_MS: u32 = 1800;
 
+/// Connection-level events surfaced to the application via [`Peripheral::events`].
+#[derive(Clone, Copy, Debug)]
+pub enum PeripheralEvent {
+    /// The ATT MTU for the connection changed (negotiated or peer-initiated).
+    MtuChanged { mtu: u16 },
+    /// Connection parameters were updated. `status` is 0 on success.
+    ConnParamsUpdated { status: u32 },
+    /// The connection was terminated. `reason` is the HCI/host reason code.
+    Disconnected { reason: u32 },
+}
+
 /// Shared state for a peripheral, leaked to `'static`.
 ///
 /// Lives as long as the program. The GAP callback holds a raw pointer to this,
@@ -71,6 +82,9 @@ struct PeripheralInner<M: RawMutex + 'static> {
 
     /// Notifications/indications stream: (attr_handle, payload).
     subscription_pub: PubSubChannel<M, (u16, Vec<u8>), 16, 4, 1>,
+
+    /// Connection-level events (MTU change, conn-param update, disconnect).
+    event_pub: PubSubChannel<M, PeripheralEvent, 4, 2, 1>,
 }
 
 impl<M: RawMutex + 'static> PeripheralInner<M> {
@@ -105,6 +119,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             disconnect_pub: PubSubChannel::new(),
             services: BlockingMutex::new(RefCell::new(Vec::new())),
             subscription_pub: PubSubChannel::new(),
+            event_pub: PubSubChannel::new(),
         }));
 
         Self { inner }
@@ -319,6 +334,16 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             .map_err(|_| InternalError::ChannelClosed)
     }
 
+    /// Subscribe to connection-level events (MTU change, conn-param update, disconnect).
+    pub fn events(
+        &self,
+    ) -> core::result::Result<Subscriber<'_, M, PeripheralEvent, 4, 2, 1>, InternalError> {
+        self.inner
+            .event_pub
+            .subscriber()
+            .map_err(|_| InternalError::ChannelClosed)
+    }
+
     unsafe extern "C" fn gap_event_handler(
         event: *mut bindings::ble_gap_event,
         param: *mut core::ffi::c_void,
@@ -330,6 +355,8 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             bindings::BLE_GAP_EVENT_CONNECT => handle_connect(inner, &event),
             bindings::BLE_GAP_EVENT_DISCONNECT => handle_disconnect(inner, &event),
             bindings::BLE_GAP_EVENT_NOTIFY_RX => handle_notify_rx(inner, &event),
+            bindings::BLE_GAP_EVENT_MTU => handle_mtu(inner, &event),
+            bindings::BLE_GAP_EVENT_CONN_UPDATE => handle_conn_update(inner, &event),
             _ => 0,
         }
     }
@@ -415,11 +442,52 @@ fn handle_disconnect<M: RawMutex>(
         // Clear cached services on disconnect.
         inner.services.lock(|s| s.borrow_mut().clear());
 
+        // Internal abort signal for in-flight connect/discover operations.
         if let Ok(p) = inner.disconnect_pub.publisher() {
             p.publish_immediate(());
         }
+
+        // External connection-event stream.
+        if let Ok(p) = inner.event_pub.publisher() {
+            p.publish_immediate(PeripheralEvent::Disconnected {
+                reason: disconnect.reason as u32,
+            });
+        }
     } else {
         log::debug!("Not connected, ignoring disconnect event");
+    }
+
+    0
+}
+
+fn handle_mtu<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble_gap_event) -> i32 {
+    let mtu = unsafe { &event.__bindgen_anon_1.mtu };
+
+    log::debug!("MTU changed to {} on handle {}", mtu.value, mtu.conn_handle);
+
+    if let Ok(p) = inner.event_pub.publisher() {
+        p.publish_immediate(PeripheralEvent::MtuChanged { mtu: mtu.value });
+    }
+
+    0
+}
+
+fn handle_conn_update<M: RawMutex>(
+    inner: &PeripheralInner<M>,
+    event: &bindings::ble_gap_event,
+) -> i32 {
+    let conn_update = unsafe { &event.__bindgen_anon_1.conn_update };
+
+    log::debug!(
+        "Connection params updated (status {}) on handle {}",
+        conn_update.status,
+        conn_update.conn_handle
+    );
+
+    if let Ok(p) = inner.event_pub.publisher() {
+        p.publish_immediate(PeripheralEvent::ConnParamsUpdated {
+            status: conn_update.status as u32,
+        });
     }
 
     0
