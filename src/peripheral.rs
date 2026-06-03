@@ -258,9 +258,7 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         };
 
         let services = result?;
-        self.inner
-            .services
-            .lock(|s| *s.borrow_mut() = services);
+        self.inner.services.lock(|s| *s.borrow_mut() = services);
 
         Ok(())
     }
@@ -374,7 +372,8 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             return 0;
         }
 
-        let result = return_code_to_result(error.status as u32, ()).map_err(GattError::MtuExchangeFailed);
+        let result =
+            return_code_to_result(error.status as u32, ()).map_err(GattError::MtuExchangeFailed);
 
         if result.is_ok() {
             operation.context().lock(|v| *v.borrow_mut() = mtu);
@@ -406,7 +405,9 @@ fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble
             log::info!("Already connected with handle {current}, ignoring connect event");
         } else {
             log::info!("Connected with handle {}", connect.conn_handle);
-            inner.conn_handle.store(connect.conn_handle, Ordering::Release);
+            inner
+                .conn_handle
+                .store(connect.conn_handle, Ordering::Release);
         }
     } else {
         log::error!("Failed to connect: {:?}", result.as_ref().unwrap_err());

@@ -204,8 +204,11 @@ where
         match nimble_uuid_to_uuid(&service.uuid) {
             Ok(uuid) => {
                 operation.context().lock(|v| {
-                    v.borrow_mut()
-                        .push(Service::new(uuid, service.start_handle, service.end_handle))
+                    v.borrow_mut().push(Service::new(
+                        uuid,
+                        service.start_handle,
+                        service.end_handle,
+                    ))
                 });
             }
             Err(e) => {
@@ -262,8 +265,7 @@ where
         return -1;
     }
 
-    let operation =
-        unsafe { &*(operation as *const PeripheralOperation<Vec<Characteristic>, M>) };
+    let operation = unsafe { &*(operation as *const PeripheralOperation<Vec<Characteristic>, M>) };
     if conn_handle != operation.conn_handle() {
         return 0;
     }

@@ -7,7 +7,7 @@ use embassy_sync::{
     signal::Signal,
 };
 
-use crate::{error::GattResult, data::ConnectionHandle};
+use crate::{data::ConnectionHandle, error::GattResult};
 
 /// Represents an operation on a peripheral device.
 ///
@@ -26,7 +26,11 @@ pub struct PeripheralOperation<C, M: RawMutex> {
 }
 
 impl<C, M: RawMutex> PeripheralOperation<C, M> {
-    fn new(conn_handle: ConnectionHandle, finished: Arc<Signal<M, GattResult>>, context: C) -> Self {
+    fn new(
+        conn_handle: ConnectionHandle,
+        finished: Arc<Signal<M, GattResult>>,
+        context: C,
+    ) -> Self {
         Self {
             conn_handle,
             finished,

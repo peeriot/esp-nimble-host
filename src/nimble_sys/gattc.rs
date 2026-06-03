@@ -1,6 +1,6 @@
-use crate::{data::*};
+use crate::data::*;
 
-use super::{bindings, NimbleResult, host::ble_hs_mbuf_from_flat, return_code_to_result};
+use super::{NimbleResult, bindings, host::ble_hs_mbuf_from_flat, return_code_to_result};
 
 /// Reads a GATT characteristic value from the specified connection handle.
 ///

@@ -95,10 +95,7 @@ pub async fn read_attribute(conn_handle: ConnectionHandle, handle: u16) -> GattR
 
     operation_handle.join().await?;
 
-    operation
-        .take_context()
-        .flatten()
-        .ok_or(GattError::NoData)
+    operation.take_context().flatten().ok_or(GattError::NoData)
 }
 
 extern "C" fn read_attribute_callback<M>(
@@ -163,7 +160,8 @@ pub async fn write_attribute(
     data: Arc<[u8]>,
     response: bool,
 ) -> GattResult {
-    let (operation, operation_handle) = peripheral_operation::<(), CriticalSectionRawMutex>(conn_handle, ());
+    let (operation, operation_handle) =
+        peripheral_operation::<(), CriticalSectionRawMutex>(conn_handle, ());
     let data = data.as_ref();
 
     let mtu = ble_att_mtu(conn_handle).map_err(GattError::WriteFailed)?;
@@ -171,8 +169,7 @@ pub async fn write_attribute(
     let mtu = (mtu
         .get()
         .checked_sub(3)
-        .ok_or(GattError::AttMtuZero(conn_handle))?)
-        as usize;
+        .ok_or(GattError::AttMtuZero(conn_handle))?) as usize;
 
     if !response && data.len() <= mtu {
         ble_gattc_write_no_rsp_flat(conn_handle, attr_handle, data)

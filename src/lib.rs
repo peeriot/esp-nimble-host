@@ -7,12 +7,12 @@ pub mod data;
 pub mod libc;
 pub mod peripheral;
 
-mod characteristic;
+pub mod characteristic;
 mod discovery;
-mod error;
+pub mod error;
 mod nimble_sys;
 mod peripheral_operation;
-mod service;
+pub mod service;
 
 use alloc::boxed::Box;
 use alloc::slice;
@@ -43,12 +43,12 @@ use core::task::Poll;
 
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::waitqueue::AtomicWaker;
 use embassy_sync::{
     blocking_mutex::raw::RawMutex,
     channel::Channel,
     pubsub::{PubSubChannel, Subscriber},
 };
-use embassy_sync::waitqueue::AtomicWaker;
 use esp_radio::ble::controller::BleConnector;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -138,11 +138,13 @@ impl<M: RawMutex + 'static> Scanner<M> {
     /// Pass `Some(params)` to configure scan interval, window, passive mode, etc.
     /// Pass `None` to use the current parameters (or defaults on first call).
     ///
-    /// Idempotent — does nothing if already scanning.
+    /// Always (re)starts scanning: cancels any in-progress scan first so that
+    /// new parameters take effect and stale state from a NimBLE-internal stop
+    /// (BLE_GAP_EVENT_DISC_COMPLETE) is recovered from.
     pub fn start_scan(&mut self, params: Option<BleGapDiscParams>) -> ScanResult<()> {
-        if self.scanning {
-            return Ok(());
-        }
+        // Cancel any active or stale scan; ignore the error if already stopped.
+        let _ = ble_gap_disc_cancel();
+        self.scanning = false;
 
         if let Some(p) = params {
             self.params = p;
@@ -188,8 +190,10 @@ impl<M: RawMutex + 'static> Scanner<M> {
     /// receive advertisements. Multiple subscribers are supported (up to 4).
     pub fn subscribe(
         &self,
-    ) -> core::result::Result<Subscriber<'_, M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>, InternalError>
-    {
+    ) -> core::result::Result<
+        Subscriber<'_, M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>,
+        InternalError,
+    > {
         self.inner
             .adv_pub
             .subscriber()
@@ -212,21 +216,30 @@ extern "C" fn scan_event_handler<M: RawMutex + 'static>(
     match event.type_ as u32 {
         BLE_GAP_EVENT_DISC | BLE_GAP_EVENT_EXT_DISC => {
             let disc: &ble_gap_disc_desc = unsafe { &event.__bindgen_anon_1.disc };
-            if let Ok(_fields) = ble_hs_adv_parse_fields(disc) {
-                let data = unsafe { slice::from_raw_parts(disc.data, disc.length_data as usize) };
-                let adv = RawAdvertisement::new(
-                    disc.addr.into(),
-                    disc.rssi,
-                    heapless::Vec::from_slice(data)
-                        .expect("Unable to create slice from advertisement data"),
-                );
-                if let Ok(p) = inner.adv_pub.publisher() {
-                    p.publish_immediate(adv);
+            match ble_hs_adv_parse_fields(disc) {
+                Ok(_fields) => {
+                    let data =
+                        unsafe { slice::from_raw_parts(disc.data, disc.length_data as usize) };
+                    let adv = RawAdvertisement::new(
+                        disc.addr.into(),
+                        disc.rssi,
+                        heapless::Vec::from_slice(data)
+                            .expect("Unable to create slice from advertisement data"),
+                    );
+                    match inner.adv_pub.publisher() {
+                        Ok(p) => p.publish_immediate(adv),
+                        Err(_) => log::warn!(
+                            "[scanner] adv_pub publisher unavailable (too many subscribers?)"
+                        ),
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[scanner] adv parse failed (rc={}), skipping", e);
                 }
             }
         }
         BLE_GAP_EVENT_DISC_COMPLETE => {
-            log::info!("Scanning stopped");
+            log::info!("[scanner] NimBLE stopped scanning (DISC_COMPLETE)");
         }
         _ => {}
     }
@@ -340,9 +353,8 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
                 }
 
                 let payload = &packet_bytes[5..5 + data_len];
-                let rc = unsafe {
-                    os_mbuf_append(om, payload.as_ptr().cast(), payload.len() as u16)
-                };
+                let rc =
+                    unsafe { os_mbuf_append(om, payload.as_ptr().cast(), payload.len() as u16) };
                 if rc != 0 {
                     unsafe { os_mbuf_free_chain(om) };
                     panic!("os_mbuf_append payload failed");

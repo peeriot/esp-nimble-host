@@ -1,8 +1,8 @@
 // use core::ffi::CString;
 
-use crate::{data::*};
+use crate::data::*;
 
-use super::{bindings, NimbleResult, return_code_to_result};
+use super::{NimbleResult, bindings, return_code_to_result};
 
 /// Cancels an ongoing BLE GAP discovery process.
 ///

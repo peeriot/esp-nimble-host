@@ -21,7 +21,10 @@ pub enum ConnectError {
     /// Connection attempt timed out.
     Timeout,
     /// Already connected (existing handle + new handle).
-    AlreadyConnected { current_handle: u16, new_handle: u16 },
+    AlreadyConnected {
+        current_handle: u16,
+        new_handle: u16,
+    },
     /// `ble_gap_terminate()` failed.
     DisconnectFailed(NimbleError),
     /// Connection dropped while an operation was pending.

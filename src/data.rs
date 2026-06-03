@@ -3,10 +3,7 @@ use core::fmt::Debug;
 
 use uuid::Uuid;
 
-use crate::{
-    error::DataError,
-    nimble_sys::bindings,
-};
+use crate::{error::DataError, nimble_sys::bindings};
 
 /// BLE connection handle type.
 pub type ConnectionHandle = u16;
@@ -525,7 +522,9 @@ pub fn uuid_to_nimble_uuid(uuid: &Uuid) -> NimbleUuid {
 /// # Returns
 ///
 /// Returns a Rust `Uuid` if conversion is successful, otherwise an error.
-pub fn nimble_uuid_to_uuid(uuid: &bindings::ble_uuid_any_t) -> core::result::Result<Uuid, DataError> {
+pub fn nimble_uuid_to_uuid(
+    uuid: &bindings::ble_uuid_any_t,
+) -> core::result::Result<Uuid, DataError> {
     unsafe {
         match uuid.u.type_ as _ {
             bindings::BLE_UUID_TYPE_16 => Ok(uuid_from_u16(uuid.u16_.value)),
