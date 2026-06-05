@@ -55,10 +55,14 @@ pub enum PeripheralEvent {
     Disconnected { reason: u32 },
 }
 
-/// Shared state for a peripheral, leaked to `'static`.
+/// Shared state for a peripheral, reference-counted via [`Arc`].
 ///
-/// Lives as long as the program. The GAP callback holds a raw pointer to this,
-/// so it must be at a stable address (Box::leak guarantees this).
+/// While a connection is being established or held, the NimBLE GAP callback owns
+/// one additional strong reference (handed over as a raw pointer in [`Peripheral::connect`]
+/// and reclaimed on the terminal CONNECT-failure or DISCONNECT event), keeping the
+/// allocation at a stable address for as long as the callback can fire. The
+/// allocation is freed once the callback reference and every `Peripheral` /
+/// subscriber handle have been dropped.
 struct PeripheralInner<M: RawMutex + 'static> {
     addr: BleAddr,
 
@@ -97,32 +101,66 @@ impl<M: RawMutex + 'static> PeripheralInner<M> {
 
 /// Handle to a BLE peripheral device.
 ///
-/// Lightweight — holds a `&'static` reference to leaked inner state.
-/// No heap allocation per clone.
+/// Cheap to clone — it is an [`Arc`] over the shared state, so a clone only bumps
+/// a refcount. The underlying allocation is reclaimed once the last handle (and
+/// the connection callback's reference) is dropped.
 pub struct Peripheral<M: RawMutex + 'static = DefaultRawMutex> {
-    inner: &'static PeripheralInner<M>,
+    inner: Arc<PeripheralInner<M>>,
 }
 
-// Manual Clone: just copy the reference.
 impl<M: RawMutex + 'static> Clone for Peripheral<M> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
+/// A subscriber that owns a strong reference to the peripheral's shared state.
+///
+/// Returned by [`Peripheral::subscribe`] / [`Peripheral::events`]. It keeps the
+/// underlying allocation alive for as long as it is held, so it stays valid even
+/// if every [`Peripheral`] handle is dropped while the subscriber is still in use.
+pub struct OwnedSubscriber<
+    M: RawMutex + 'static,
+    T: Clone + 'static,
+    const CAP: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> {
+    // Declaration order is load-bearing: `sub` borrows into a channel owned by
+    // `_inner` and must be dropped first. Rust drops fields in declaration order.
+    sub: Subscriber<'static, M, T, CAP, SUBS, PUBS>,
+    _inner: Arc<PeripheralInner<M>>,
+}
+
+impl<M: RawMutex + 'static, T: Clone + 'static, const CAP: usize, const SUBS: usize, const PUBS: usize>
+    OwnedSubscriber<M, T, CAP, SUBS, PUBS>
+{
+    /// Wait for the next message on this subscription.
+    pub async fn next_message(&mut self) -> WaitResult<T> {
+        self.sub.next_message().await
+    }
+}
+
+/// Notification/indication subscriber returned by [`Peripheral::subscribe`].
+pub type NotificationSubscriber<M = DefaultRawMutex> = OwnedSubscriber<M, (u16, Vec<u8>), 16, 4, 1>;
+/// Connection-event subscriber returned by [`Peripheral::events`].
+pub type EventSubscriber<M = DefaultRawMutex> = OwnedSubscriber<M, PeripheralEvent, 4, 2, 1>;
+
 impl<M: RawMutex + 'static> Peripheral<M> {
     pub fn new(addr: BleAddr) -> Self {
-        let inner: &'static PeripheralInner<M> = Box::leak(Box::new(PeripheralInner {
-            addr,
-            conn_handle: AtomicU16::new(CONN_HANDLE_NONE),
-            connect_result: Signal::new(),
-            disconnect_pub: PubSubChannel::new(),
-            services: BlockingMutex::new(RefCell::new(Vec::new())),
-            subscription_pub: PubSubChannel::new(),
-            event_pub: PubSubChannel::new(),
-        }));
-
-        Self { inner }
+        Self {
+            inner: Arc::new(PeripheralInner {
+                addr,
+                conn_handle: AtomicU16::new(CONN_HANDLE_NONE),
+                connect_result: Signal::new(),
+                disconnect_pub: PubSubChannel::new(),
+                services: BlockingMutex::new(RefCell::new(Vec::new())),
+                subscription_pub: PubSubChannel::new(),
+                event_pub: PubSubChannel::new(),
+            }),
+        }
     }
 
     pub async fn connect(&self) -> ConnectResult {
@@ -135,16 +173,28 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         // stale result before arming the GAP connect.
         self.inner.connect_result.reset();
 
+        // Hand a strong reference to the GAP callback as a raw pointer. It is
+        // reclaimed on the terminal event (failed CONNECT or DISCONNECT) inside
+        // `gap_event_handler`, keeping the allocation alive for as long as the
+        // callback can fire.
+        let raw = Arc::into_raw(self.inner.clone());
+
         let addr = self.inner.addr.clone().into();
-        ble_gap_connect(
+        if let Err(e) = ble_gap_connect(
             0,
             &addr,
             CONNECT_TIMEOUT_MS,
             None,
             Some(Self::gap_event_handler),
-            self.inner as *const PeripheralInner<M> as _,
-        )
-        .map_err(ConnectError::GapConnectFailed)?;
+            raw as *mut core::ffi::c_void,
+        ) {
+            // The callback was never registered, so no terminal event will reclaim
+            // the reference — drop it here to avoid leaking the allocation.
+            // SAFETY: `raw` came from `Arc::into_raw` directly above and has not been
+            // handed to NimBLE, so this is the sole owner of that strong reference.
+            drop(unsafe { Arc::from_raw(raw) });
+            return Err(ConnectError::GapConnectFailed(e));
+        }
 
         let mut disc_sub = self
             .inner
@@ -323,23 +373,44 @@ impl<M: RawMutex + 'static> Peripheral<M> {
     }
 
     /// Subscribe to notifications/indications.
-    pub fn subscribe(
-        &self,
-    ) -> core::result::Result<Subscriber<'_, M, (u16, Vec<u8>), 16, 4, 1>, InternalError> {
-        self.inner
+    ///
+    /// The returned subscriber owns a strong reference to the peripheral, so it
+    /// stays valid even if every [`Peripheral`] handle is dropped while it is held.
+    pub fn subscribe(&self) -> core::result::Result<NotificationSubscriber<M>, InternalError> {
+        let sub = self
+            .inner
             .subscription_pub
             .subscriber()
-            .map_err(|_| InternalError::ChannelClosed)
+            .map_err(|_| InternalError::ChannelClosed)?;
+        // SAFETY: the `_inner` clone keeps the PubSubChannel alive for as long as the
+        // returned subscriber exists, and `OwnedSubscriber` drops `sub` before `_inner`
+        // (field declaration order), so the extended `'static` lifetime never dangles.
+        let sub: Subscriber<'static, M, (u16, Vec<u8>), 16, 4, 1> =
+            unsafe { core::mem::transmute(sub) };
+        Ok(OwnedSubscriber {
+            sub,
+            _inner: self.inner.clone(),
+        })
     }
 
     /// Subscribe to connection-level events (MTU change, conn-param update, disconnect).
-    pub fn events(
-        &self,
-    ) -> core::result::Result<Subscriber<'_, M, PeripheralEvent, 4, 2, 1>, InternalError> {
-        self.inner
+    ///
+    /// The returned subscriber owns a strong reference to the peripheral, so it
+    /// stays valid even if every [`Peripheral`] handle is dropped while it is held.
+    pub fn events(&self) -> core::result::Result<EventSubscriber<M>, InternalError> {
+        let sub = self
+            .inner
             .event_pub
             .subscriber()
-            .map_err(|_| InternalError::ChannelClosed)
+            .map_err(|_| InternalError::ChannelClosed)?;
+        // SAFETY: see `subscribe` — `_inner` keeps the channel alive and `sub` is
+        // dropped before `_inner`.
+        let sub: Subscriber<'static, M, PeripheralEvent, 4, 2, 1> =
+            unsafe { core::mem::transmute(sub) };
+        Ok(OwnedSubscriber {
+            sub,
+            _inner: self.inner.clone(),
+        })
     }
 
     unsafe extern "C" fn gap_event_handler(
@@ -350,8 +421,27 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         let event = unsafe { *event };
 
         match event.type_ as u32 {
-            bindings::BLE_GAP_EVENT_CONNECT => handle_connect(inner, &event),
-            bindings::BLE_GAP_EVENT_DISCONNECT => handle_disconnect(inner, &event),
+            bindings::BLE_GAP_EVENT_CONNECT => {
+                let established = handle_connect(inner, &event);
+                if !established {
+                    // A failed connect is terminal — no DISCONNECT follows — so this
+                    // is the last event for the reference handed over in `connect()`.
+                    // SAFETY: balances the `Arc::into_raw` in `connect()`. NimBLE
+                    // delivers exactly one CONNECT result per attempt, so this runs
+                    // once. `inner` is not touched after the drop.
+                    drop(unsafe { Arc::from_raw(param as *const PeripheralInner<M>) });
+                }
+                0
+            }
+            bindings::BLE_GAP_EVENT_DISCONNECT => {
+                handle_disconnect(inner, &event);
+                // Disconnect is the terminal event for an established connection.
+                // SAFETY: balances the `Arc::into_raw` in `connect()`. NimBLE delivers
+                // exactly one DISCONNECT for the connection owned by this callback, so
+                // this runs once. `inner` is not touched after the drop.
+                drop(unsafe { Arc::from_raw(param as *const PeripheralInner<M>) });
+                0
+            }
             bindings::BLE_GAP_EVENT_NOTIFY_RX => handle_notify_rx(inner, &event),
             bindings::BLE_GAP_EVENT_MTU => handle_mtu(inner, &event),
             bindings::BLE_GAP_EVENT_CONN_UPDATE => handle_conn_update(inner, &event),
@@ -388,7 +478,13 @@ impl<M: RawMutex + 'static> Peripheral<M> {
     }
 }
 
-fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble_gap_event) -> i32 {
+/// Handles a CONNECT event. Returns `true` if a connection was established (the
+/// caller must then keep the callback's reference alive until DISCONNECT), or
+/// `false` on failure (the attempt is terminal and the reference is released).
+fn handle_connect<M: RawMutex>(
+    inner: &PeripheralInner<M>,
+    event: &bindings::ble_gap_event,
+) -> bool {
     let connect = unsafe { &event.__bindgen_anon_1.connect };
     // A connect-duration expiry comes back as BLE_HS_ETIMEOUT; surface it as the
     // semantic `Timeout` so callers can match it without inspecting the raw code.
@@ -398,7 +494,9 @@ fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble
         Err(e) => Err(ConnectError::GapConnectFailed(e)),
     };
 
-    if result.is_ok() {
+    let established = result.is_ok();
+
+    if established {
         let current = inner.conn_handle.load(Ordering::Acquire);
 
         if current != CONN_HANDLE_NONE {
@@ -415,7 +513,7 @@ fn handle_connect<M: RawMutex>(inner: &PeripheralInner<M>, event: &bindings::ble
 
     inner.connect_result.signal(result);
 
-    0
+    established
 }
 
 fn handle_disconnect<M: RawMutex>(
