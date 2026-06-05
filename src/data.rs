@@ -77,12 +77,12 @@ impl BleAddr {
             .map(|p| u8::from_str_radix(p, 16))
             .collect::<core::result::Result<_, _>>()
             .map_err(|_| {
-                DataError::InvalidArgument(format!("Unable to parse MAC address: '{addr}'").into())
+                DataError::InvalidArgument(format!("Unable to parse MAC address: '{addr}'"))
             })?;
 
         if parts.len() != 6 {
             return Err(DataError::InvalidArgument(
-                format!("Unable to parse MAC address: '{addr}'").into(),
+                format!("Unable to parse MAC address: '{addr}'"),
             ));
         }
 
@@ -125,7 +125,7 @@ impl Into<bindings::ble_addr_t> for BleAddr {
 
 impl core::fmt::Display for BleAddr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut addr = self.addr.clone();
+        let mut addr = self.addr;
         addr.reverse();
         write!(f, "{}", addr.map(|b| format!("{b:02x}")).join(":"))
     }
@@ -187,9 +187,9 @@ impl From<bindings::ble_gap_disc_params> for BleGapDiscParams {
     }
 }
 
-impl Into<bindings::ble_gap_disc_params> for BleGapDiscParams {
-    fn into(self) -> bindings::ble_gap_disc_params {
-        self.0
+impl From<BleGapDiscParams> for bindings::ble_gap_disc_params {
+    fn from(val: BleGapDiscParams) -> Self {
+        val.0
     }
 }
 
@@ -411,7 +411,7 @@ impl From<RawAdvertisement> for Advertisement {
     // TODO: Convert to try_from, since it can fail
     fn from(value: RawAdvertisement) -> Self {
         let mut fields: bindings::ble_hs_adv_fields = unsafe { core::mem::zeroed() };
-        let ret = unsafe {
+        let _ret = unsafe {
             bindings::ble_hs_adv_parse_fields(
                 &mut fields,
                 value.data.as_ptr(),
@@ -532,11 +532,11 @@ pub fn nimble_uuid_to_uuid(
             bindings::BLE_UUID_TYPE_128 => match Uuid::from_slice(&uuid.u128_.value) {
                 Ok(uuid) => Ok(uuid),
                 Err(err) => Err(DataError::UuidConversion(
-                    format!("Unable to decode 128bit UUID: {err}").into(),
+                    format!("Unable to decode 128bit UUID: {err}"),
                 )),
             },
             _ => Err(DataError::UuidConversion(
-                format!("Invalid UUID type: {}", uuid.u.type_).into(),
+                format!("Invalid UUID type: {}", uuid.u.type_),
             )),
         }
     }

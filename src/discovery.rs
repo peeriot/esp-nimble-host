@@ -149,7 +149,7 @@ async fn nimble_discover_services(conn_handle: ConnectionHandle) -> GattResult<V
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| GattError::NoServicesDiscovered)
+        .ok_or(GattError::NoServicesDiscovered)
 }
 
 async fn nimble_discover_service_by_uuid(
@@ -170,7 +170,7 @@ async fn nimble_discover_service_by_uuid(
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| GattError::NoServicesDiscovered)
+        .ok_or(GattError::NoServicesDiscovered)
 }
 
 extern "C" fn service_discovered_cb<M>(
@@ -248,7 +248,7 @@ async fn nimble_discover_characteristics(
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| GattError::NoCharacteristicsDiscovered)
+        .ok_or(GattError::NoCharacteristicsDiscovered)
 }
 
 extern "C" fn characteristic_disc_cb<M>(
@@ -317,7 +317,7 @@ async fn nimble_discover_characteristic_descriptors(
     operation_handle.join().await?;
     operation
         .take_context()
-        .ok_or_else(|| GattError::NoDescriptorsDiscovered)
+        .ok_or(GattError::NoDescriptorsDiscovered)
 }
 
 extern "C" fn characteristic_descriptor_disc_cb<M>(

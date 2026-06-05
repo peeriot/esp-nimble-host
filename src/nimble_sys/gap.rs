@@ -303,7 +303,7 @@ impl From<&bindings::ble_gap_event> for BleGapEvent {
                 let data = unsafe { value.__bindgen_anon_1.disconnect };
                 BleGapEvent::Disconnect {
                     reason: data.reason as u32,
-                    conn: data.conn.clone(),
+                    conn: data.conn,
                 }
             }
             bindings::BLE_GAP_EVENT_CONN_UPDATE => {
@@ -317,8 +317,8 @@ impl From<&bindings::ble_gap_event> for BleGapEvent {
                 let data = unsafe { value.__bindgen_anon_1.conn_update_req };
                 BleGapEvent::ConnUpdateReq {
                     conn_handle: data.conn_handle,
-                    peer_params: unsafe { *data.peer_params }.clone(),
-                    self_params: unsafe { *data.self_params }.clone(),
+                    peer_params: unsafe { *data.peer_params },
+                    self_params: unsafe { *data.self_params },
                 }
             }
             bindings::BLE_GAP_EVENT_PHY_UPDATE_COMPLETE => {

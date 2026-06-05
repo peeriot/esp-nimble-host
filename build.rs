@@ -562,7 +562,7 @@ fn main() {
         nimble_dir.join("nimble/transport/include"),
     ];
 
-    let exclude_headers = vec!["porting/nimble/include/syscfg/syscfg.h"];
+    let exclude_headers = ["porting/nimble/include/syscfg/syscfg.h"];
 
     // ----- Bindgen -----
     let headers = include_dirs
@@ -626,7 +626,7 @@ fn main() {
     cc_build
         .compiler("clang")
         // Include config overrides before all NimBLE source files.
-        .flag(&format!("-include{}", override_header.display()))
+        .flag(format!("-include{}", override_header.display()))
         .flag("--target=riscv32-unknown-none-elf")
         .flag("-march=rv32imac")
         .flag("-mabi=ilp32")

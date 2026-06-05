@@ -23,7 +23,7 @@ pub use uuid;
 use crate::data::{BleGapDiscParams, RawAdvertisement};
 // Re-export public types
 pub use crate::data::Advertisement;
-use crate::error::{Error, InternalError, ScanError, ScanResult};
+use crate::error::{InternalError, ScanError, ScanResult};
 use crate::nimble_sys::bindings::{
     BLE_HS_FOREVER, ble_transport_to_hs_acl_impl, ble_transport_to_hs_evt_impl,
 };
@@ -460,7 +460,7 @@ pub unsafe extern "C" fn ble_transport_to_ll_cmd_impl(buf: *mut c_void) -> c_int
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int {
+pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int { unsafe {
     if om.is_null() {
         return BLE_HS_EINVAL as _;
     }
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
         Ok(()) => 0,
         Err(_) => BLE_HS_EAGAIN as _,
     }
-}
+}}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_to_ll_iso_impl(_om: *mut os_mbuf) -> c_int {

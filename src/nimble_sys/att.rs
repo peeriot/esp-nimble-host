@@ -16,7 +16,7 @@ use super::{NimbleError, NimbleResult, bindings};
 pub fn ble_att_mtu(conn_handle: ConnectionHandle) -> NimbleResult<NonZeroU16> {
     let mtu = unsafe { bindings::ble_att_mtu(conn_handle) };
 
-    NonZeroU16::new(mtu).ok_or_else(|| NimbleError::AttMtuZero(conn_handle))
+    NonZeroU16::new(mtu).ok_or(NimbleError::AttMtuZero(conn_handle))
 }
 
 /// Sets the preferred ATT MTU for future connections.
