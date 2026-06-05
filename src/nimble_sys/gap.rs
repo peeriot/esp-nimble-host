@@ -263,7 +263,7 @@ pub enum BleGapEvent {
         prev_indicate: bool,
         curr_indicate: bool,
     },
-    MTU {
+    Mtu {
         conn_handle: u16,
         channel_id: u16,
         value: u16,
@@ -356,7 +356,7 @@ impl From<&bindings::ble_gap_event> for BleGapEvent {
             bindings::BLE_GAP_EVENT_MTU => {
                 let data = unsafe { value.__bindgen_anon_1.mtu };
 
-                BleGapEvent::MTU {
+                BleGapEvent::Mtu {
                     conn_handle: data.conn_handle,
                     channel_id: data.channel_id,
                     value: data.value,

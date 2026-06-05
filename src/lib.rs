@@ -115,6 +115,12 @@ struct ScannerInner<M: RawMutex + 'static> {
     adv_pub: PubSubChannel<M, RawAdvertisement, ADV_PUBSUB_CAP, 4, 1>,
 }
 
+impl<M: RawMutex + 'static> Default for Scanner<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<M: RawMutex + 'static> Scanner<M> {
     /// Create a new scanner. Call after [`wait_for_sync()`].
     ///
@@ -423,11 +429,16 @@ pub extern "C" fn host_task(_: *mut c_void) {
 
 // ── NimBLE C FFI callbacks ───────────────────────────────────────────────────
 
+/// # Safety
+/// Called only by the NimBLE transport layer during initialization.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_ll_init() {
     // No-Op because esp-radio does it for us
 }
 
+/// # Safety
+/// Called only by the NimBLE host task to forward HCI commands to the controller.
+/// `buf` must be a valid pointer to a `ble_hci_cmd` allocated by NimBLE.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_to_ll_cmd_impl(buf: *mut c_void) -> c_int {
     if buf.is_null() {
@@ -459,6 +470,9 @@ pub unsafe extern "C" fn ble_transport_to_ll_cmd_impl(buf: *mut c_void) -> c_int
     }
 }
 
+/// # Safety
+/// Called only by the NimBLE host task to forward ACL data to the controller.
+/// `om` must be a valid NimBLE mbuf chain or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int { unsafe {
     if om.is_null() {
@@ -508,6 +522,8 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
     }
 }}
 
+/// # Safety
+/// Called only by the NimBLE host task. ISO data is not supported; always panics.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_to_ll_iso_impl(_om: *mut os_mbuf) -> c_int {
     todo!()

@@ -12,7 +12,7 @@ pub type AttributeHandle = u16;
 
 /// BLE address (MAC address and type).
 // #[derive(Clone, Serialize, Hash, Deserialize, Eq)]
-#[derive(Clone, Hash, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct BleAddr {
     pub type_: u8,
     pub addr: [u8; 6],
@@ -21,12 +21,6 @@ pub struct BleAddr {
 impl Debug for BleAddr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "BleAddr({})", self)
-    }
-}
-
-impl PartialEq for BleAddr {
-    fn eq(&self, other: &Self) -> bool {
-        self.type_ == other.type_ && self.addr == other.addr
     }
 }
 
@@ -114,11 +108,11 @@ impl From<bindings::ble_addr_t> for BleAddr {
     }
 }
 
-impl Into<bindings::ble_addr_t> for BleAddr {
-    fn into(self) -> bindings::ble_addr_t {
+impl From<BleAddr> for bindings::ble_addr_t {
+    fn from(a: BleAddr) -> Self {
         bindings::ble_addr_t {
-            type_: self.type_,
-            val: self.addr,
+            type_: a.type_,
+            val: a.addr,
         }
     }
 }

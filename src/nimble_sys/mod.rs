@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod att;
 pub mod gap;
 mod gattc;
