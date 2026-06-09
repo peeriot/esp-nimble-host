@@ -222,25 +222,21 @@ extern "C" fn scan_event_handler<M: RawMutex + 'static>(
     match event.type_ as u32 {
         BLE_GAP_EVENT_DISC | BLE_GAP_EVENT_EXT_DISC => {
             let disc: &ble_gap_disc_desc = unsafe { &event.__bindgen_anon_1.disc };
-            match ble_hs_adv_parse_fields(disc) {
-                Ok(_fields) => {
-                    let data =
-                        unsafe { slice::from_raw_parts(disc.data, disc.length_data as usize) };
-                    let adv = RawAdvertisement::new(
-                        disc.addr.into(),
-                        disc.rssi,
-                        heapless::Vec::from_slice(data)
-                            .expect("Unable to create slice from advertisement data"),
-                    );
-                    match inner.adv_pub.publisher() {
-                        Ok(p) => p.publish_immediate(adv),
-                        Err(_) => log::warn!(
-                            "[scanner] adv_pub publisher unavailable (too many subscribers?)"
-                        ),
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[scanner] adv parse failed (rc={}), skipping", e);
+            // Only publish advertisements whose AD structure NimBLE can parse; raw bytes
+            // are forwarded as-is so callers can parse manufacturer data themselves.
+            if ble_hs_adv_parse_fields(disc).is_ok() {
+                let data = unsafe { slice::from_raw_parts(disc.data, disc.length_data as usize) };
+                let adv = RawAdvertisement::new(
+                    disc.addr.into(),
+                    disc.rssi,
+                    heapless::Vec::from_slice(data)
+                        .expect("Unable to create slice from advertisement data"),
+                );
+                match inner.adv_pub.publisher() {
+                    Ok(p) => p.publish_immediate(adv),
+                    Err(_) => log::warn!(
+                        "[scanner] adv_pub publisher unavailable (too many subscribers?)"
+                    ),
                 }
             }
         }
@@ -474,53 +470,55 @@ pub unsafe extern "C" fn ble_transport_to_ll_cmd_impl(buf: *mut c_void) -> c_int
 /// Called only by the NimBLE host task to forward ACL data to the controller.
 /// `om` must be a valid NimBLE mbuf chain or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int { unsafe {
-    if om.is_null() {
-        return BLE_HS_EINVAL as _;
-    }
-
-    // Compute total length of the mbuf chain.
-    let mut total_len: usize = 0;
-    {
-        let mut cur = om;
-        while !cur.is_null() {
-            total_len += (*cur).om_len as usize;
-            cur = (*cur).om_next.sle_next;
+pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int {
+    unsafe {
+        if om.is_null() {
+            return BLE_HS_EINVAL as _;
         }
-    }
 
-    // Must include at least the HCI ACL header (4 bytes).
-    if total_len < 4 {
-        os_mbuf_free_chain(om);
-        return BLE_HS_EINVAL as _;
-    }
-
-    // Build H4 frame: type + (HCI ACL header + payload)
-    let mut packet = Vec::with_capacity(1 + total_len);
-    packet.push(H4_ACL);
-
-    // Copy mbuf chain into packet
-    {
-        let mut cur = om;
-        while !cur.is_null() {
-            let seg_len = (*cur).om_len as usize;
-            if seg_len != 0 {
-                let seg = core::slice::from_raw_parts((*cur).om_data as *const u8, seg_len);
-                packet.extend_from_slice(seg);
+        // Compute total length of the mbuf chain.
+        let mut total_len: usize = 0;
+        {
+            let mut cur = om;
+            while !cur.is_null() {
+                total_len += (*cur).om_len as usize;
+                cur = (*cur).om_next.sle_next;
             }
-            cur = (*cur).om_next.sle_next;
+        }
+
+        // Must include at least the HCI ACL header (4 bytes).
+        if total_len < 4 {
+            os_mbuf_free_chain(om);
+            return BLE_HS_EINVAL as _;
+        }
+
+        // Build H4 frame: type + (HCI ACL header + payload)
+        let mut packet = Vec::with_capacity(1 + total_len);
+        packet.push(H4_ACL);
+
+        // Copy mbuf chain into packet
+        {
+            let mut cur = om;
+            while !cur.is_null() {
+                let seg_len = (*cur).om_len as usize;
+                if seg_len != 0 {
+                    let seg = core::slice::from_raw_parts((*cur).om_data as *const u8, seg_len);
+                    packet.extend_from_slice(seg);
+                }
+                cur = (*cur).om_next.sle_next;
+            }
+        }
+
+        // Free the chain now that we've copied it out
+        os_mbuf_free_chain(om);
+
+        // Send to controller transport
+        match HOST_2_CONTROLLER_QUEUE.try_send(packet) {
+            Ok(()) => 0,
+            Err(_) => BLE_HS_EAGAIN as _,
         }
     }
-
-    // Free the chain now that we've copied it out
-    os_mbuf_free_chain(om);
-
-    // Send to controller transport
-    match HOST_2_CONTROLLER_QUEUE.try_send(packet) {
-        Ok(()) => 0,
-        Err(_) => BLE_HS_EAGAIN as _,
-    }
-}}
+}
 
 /// # Safety
 /// Called only by the NimBLE host task. ISO data is not supported; always panics.

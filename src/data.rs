@@ -75,9 +75,9 @@ impl BleAddr {
             })?;
 
         if parts.len() != 6 {
-            return Err(DataError::InvalidArgument(
-                format!("Unable to parse MAC address: '{addr}'"),
-            ));
+            return Err(DataError::InvalidArgument(format!(
+                "Unable to parse MAC address: '{addr}'"
+            )));
         }
 
         parts.reverse();
@@ -347,6 +347,19 @@ impl RawAdvertisement {
     pub fn new(addr: BleAddr, rssi: i8, data: heapless::Vec<u8, 255>) -> Self {
         Self { addr, rssi, data }
     }
+
+    pub fn addr(&self) -> &BleAddr {
+        &self.addr
+    }
+
+    pub fn rssi(&self) -> i8 {
+        self.rssi
+    }
+
+    /// Raw BLE advertisement bytes (AD structure).
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 /// BLE advertisement, including address, RSSI, and parsed fields.
@@ -525,13 +538,14 @@ pub fn nimble_uuid_to_uuid(
             bindings::BLE_UUID_TYPE_32 => Ok(uuid_from_u32(uuid.u32_.value)),
             bindings::BLE_UUID_TYPE_128 => match Uuid::from_slice(&uuid.u128_.value) {
                 Ok(uuid) => Ok(uuid),
-                Err(err) => Err(DataError::UuidConversion(
-                    format!("Unable to decode 128bit UUID: {err}"),
-                )),
+                Err(err) => Err(DataError::UuidConversion(format!(
+                    "Unable to decode 128bit UUID: {err}"
+                ))),
             },
-            _ => Err(DataError::UuidConversion(
-                format!("Invalid UUID type: {}", uuid.u.type_),
-            )),
+            _ => Err(DataError::UuidConversion(format!(
+                "Invalid UUID type: {}",
+                uuid.u.type_
+            ))),
         }
     }
 }

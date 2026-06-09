@@ -11,12 +11,22 @@ esp32c3 = ["esp-radio/esp32c3"]
 esp32c6 = ["esp-radio/esp32c6"]
 
 [dependencies]
-esp-radio              = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = ["ble-host-npl", "log-04", "unstable"] }
-esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = ["unstable"] }
-embassy-sync           = "0.7.2"
+esp-radio = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = [
+  "ble-host-npl",
+  "log-04",
+  "unstable",
+] }
+esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = [
+  "unstable",
+] }
+embassy-sync = "0.7.2"
 embassy-futures = "0.1.2"
 log = "0.4.29"
-tinyrlibc = { version = "0.5.1", default-features = false, features = ["strcat", "strcpy", "strlen"] }
+tinyrlibc = { version = "0.5.1", default-features = false, features = [
+  "strcat",
+  "strcpy",
+  "strlen",
+] }
 embedded-io = "0.6.1"
 embedded-io-async = "0.6.1"
 portable-atomic = "1.13.0"

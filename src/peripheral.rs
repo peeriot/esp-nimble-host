@@ -134,8 +134,13 @@ pub struct OwnedSubscriber<
     _inner: Arc<PeripheralInner<M>>,
 }
 
-impl<M: RawMutex + 'static, T: Clone + 'static, const CAP: usize, const SUBS: usize, const PUBS: usize>
-    OwnedSubscriber<M, T, CAP, SUBS, PUBS>
+impl<
+    M: RawMutex + 'static,
+    T: Clone + 'static,
+    const CAP: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> OwnedSubscriber<M, T, CAP, SUBS, PUBS>
 {
     /// Wait for the next message on this subscription.
     pub async fn next_message(&mut self) -> WaitResult<T> {
