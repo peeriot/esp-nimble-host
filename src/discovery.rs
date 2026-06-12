@@ -223,6 +223,7 @@ where
         return 0;
     }
 
+    log::warn!("service discovery error status={}", error.status);
     error.status as _
 }
 

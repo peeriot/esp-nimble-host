@@ -513,9 +513,13 @@ pub fn uuid_to_nimble_uuid(uuid: &Uuid) -> NimbleUuid {
             value,
         })
     } else {
+        // uuid::Uuid stores bytes in big-endian (RFC 4122) order;
+        // NimBLE expects little-endian BLE wire order.
+        let mut value = uuid.into_bytes();
+        value.reverse();
         NimbleUuid::Uuid128(bindings::ble_uuid128_t {
             u: bindings::ble_uuid_t { type_: 128 },
-            value: uuid.into_bytes(),
+            value,
         })
     }
 }
@@ -536,12 +540,18 @@ pub fn nimble_uuid_to_uuid(
         match uuid.u.type_ as _ {
             bindings::BLE_UUID_TYPE_16 => Ok(uuid_from_u16(uuid.u16_.value)),
             bindings::BLE_UUID_TYPE_32 => Ok(uuid_from_u32(uuid.u32_.value)),
-            bindings::BLE_UUID_TYPE_128 => match Uuid::from_slice(&uuid.u128_.value) {
-                Ok(uuid) => Ok(uuid),
-                Err(err) => Err(DataError::UuidConversion(format!(
-                    "Unable to decode 128bit UUID: {err}"
-                ))),
-            },
+            bindings::BLE_UUID_TYPE_128 => {
+                // NimBLE stores 128-bit UUIDs in BLE little-endian wire order;
+                // uuid::Uuid expects big-endian (RFC 4122) byte order.
+                let mut bytes = uuid.u128_.value;
+                bytes.reverse();
+                match Uuid::from_slice(&bytes) {
+                    Ok(uuid) => Ok(uuid),
+                    Err(err) => Err(DataError::UuidConversion(format!(
+                        "Unable to decode 128bit UUID: {err}"
+                    ))),
+                }
+            }
             _ => Err(DataError::UuidConversion(format!(
                 "Invalid UUID type: {}",
                 uuid.u.type_
