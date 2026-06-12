@@ -30,8 +30,9 @@ use crate::nimble_sys::bindings::{
 use crate::nimble_sys::{
     bindings::{
         BLE_GAP_EVENT_DISC, BLE_GAP_EVENT_DISC_COMPLETE, BLE_GAP_EVENT_EXT_DISC, BLE_HS_EAGAIN,
-        BLE_HS_EINVAL, MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE, ble_gap_disc_desc, ble_gap_event,
-        ble_hci_cmd, ble_hci_ev, ble_hs_cfg, ble_transport_alloc_evt, ble_transport_free, os_mbuf,
+        BLE_HS_EINVAL, BLE_HS_IO_KEYBOARD_ONLY,
+        MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE, ble_gap_disc_desc, ble_gap_event, ble_hci_cmd,
+        ble_hci_ev, ble_hs_cfg, ble_transport_alloc_evt, ble_transport_free, os_mbuf,
         os_mbuf_append, os_mbuf_free_chain, os_msys_get_pkthdr,
     },
     ble_gap_disc, ble_gap_disc_cancel, ble_hs_adv_parse_fields, ble_hs_id_copy_addr,
@@ -277,6 +278,7 @@ impl HostTransport {
         unsafe {
             ble_hs_cfg.sync_cb = Some(on_sync);
             ble_hs_cfg.reset_cb = Some(on_reset);
+            ble_hs_cfg.sm_io_cap = BLE_HS_IO_KEYBOARD_ONLY as u8;
         }
     }
 }

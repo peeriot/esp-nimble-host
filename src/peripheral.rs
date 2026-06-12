@@ -8,7 +8,7 @@ use embassy_sync::{
     pubsub::{PubSubChannel, Subscriber, WaitResult},
     signal::Signal,
 };
-use portable_atomic::{AtomicU16, Ordering};
+use portable_atomic::{AtomicU16, AtomicU32, Ordering};
 
 use uuid::Uuid;
 
@@ -16,7 +16,7 @@ use crate::{
     characteristic::{Characteristic, Descriptor, read_attribute, write_attribute},
     data::BleAddr,
     discovery::{ServiceCharacteristicsDiscovery, ServiceDiscovery},
-    error::{ConnectError, ConnectResult, GattError, GattResult, InternalError},
+    error::{ConnectError, ConnectResult, GattError, GattResult, InternalError, PairError, PairResult},
     nimble_sys::*,
     peripheral_operation::{PeripheralOperation, peripheral_operation},
     service::Service,
@@ -89,6 +89,12 @@ struct PeripheralInner<M: RawMutex + 'static> {
 
     /// Connection-level events (MTU change, conn-param update, disconnect).
     event_pub: PubSubChannel<M, PeripheralEvent, 4, 2, 1>,
+
+    /// Passkey stored before `pair_with_passkey` initiates; injected on PASSKEY_ACTION.
+    static_passkey: AtomicU32,
+
+    /// Signals the result of an in-progress `pair_with_passkey` call.
+    pair_result: Signal<M, PairResult>,
 }
 
 impl<M: RawMutex + 'static> PeripheralInner<M> {
@@ -164,6 +170,8 @@ impl<M: RawMutex + 'static> Peripheral<M> {
                 services: BlockingMutex::new(RefCell::new(Vec::new())),
                 subscription_pub: PubSubChannel::new(),
                 event_pub: PubSubChannel::new(),
+                static_passkey: AtomicU32::new(0),
+                pair_result: Signal::new(),
             }),
         }
     }
@@ -244,6 +252,36 @@ impl<M: RawMutex + 'static> Peripheral<M> {
 
     pub fn is_connected(&self) -> bool {
         self.inner.conn_handle().is_some()
+    }
+
+    /// Initiate Legacy passkey pairing on an established connection.
+    ///
+    /// Stores `passkey`, resets the pair signal, calls
+    /// `ble_gap_security_initiate`, then awaits `BLE_GAP_EVENT_ENC_CHANGE`
+    /// (or a disconnect). The passkey is injected automatically when
+    /// `BLE_GAP_EVENT_PASSKEY_ACTION` fires in the GAP callback.
+    pub async fn pair_with_passkey(&self, passkey: u32) -> PairResult {
+        let Some(conn_handle) = self.inner.conn_handle() else {
+            return Err(PairError::NotConnected);
+        };
+
+        self.inner.static_passkey.store(passkey, Ordering::Release);
+        self.inner.pair_result.reset();
+
+        ble_gap_security_initiate(conn_handle).map_err(PairError::InitiateFailed)?;
+
+        let mut disc_sub = self
+            .inner
+            .disconnect_pub
+            .subscriber()
+            .map_err(|_| PairError::DisconnectedWhileOperation)?;
+
+        match select(self.inner.pair_result.wait(), disc_sub.next_message()).await {
+            Either::First(result) => result,
+            Either::Second(WaitResult::Message(())) | Either::Second(WaitResult::Lagged(_)) => {
+                Err(PairError::DisconnectedWhileOperation)
+            }
+        }
     }
 
     pub async fn exchange_mtu(&self) -> GattResult {
@@ -426,6 +464,13 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         let event = unsafe { *event };
 
         match event.type_ as u32 {
+            bindings::BLE_GAP_EVENT_PASSKEY_ACTION => handle_passkey_action(inner, &event),
+            bindings::BLE_GAP_EVENT_ENC_CHANGE => handle_enc_change(inner, &event),
+            bindings::BLE_GAP_EVENT_REPEAT_PAIRING => {
+                // bonding=0 means no stored bonds — should never fire; ignore safely.
+                log::warn!("[peripheral] REPEAT_PAIRING received with bonding disabled — ignoring");
+                bindings::BLE_GAP_REPEAT_PAIRING_IGNORE as i32
+            }
             bindings::BLE_GAP_EVENT_CONNECT => {
                 let established = handle_connect(inner, &event);
                 if !established {
@@ -593,6 +638,56 @@ fn handle_conn_update<M: RawMutex>(
             status: conn_update.status as u32,
         });
     }
+
+    0
+}
+
+fn handle_passkey_action<M: RawMutex>(
+    inner: &PeripheralInner<M>,
+    event: &bindings::ble_gap_event,
+) -> i32 {
+    let pk = unsafe { &event.__bindgen_anon_1.passkey };
+
+    let action = pk.params.action as u32;
+    if action != bindings::BLE_SM_IOACT_INPUT && action != bindings::BLE_SM_IOACT_DISP {
+        log::warn!(
+            "[peripheral] Unexpected passkey IO action {} — only INPUT/DISP supported",
+            pk.params.action
+        );
+        // SM will time out; ENC_CHANGE fires with a non-zero status.
+        return 0;
+    }
+
+    let passkey_val = inner.static_passkey.load(Ordering::Acquire);
+    let mut io: bindings::ble_sm_io = unsafe { core::mem::zeroed() };
+    io.action = action as u8;  // INPUT or DISP — same injection mechanism
+    unsafe { io.__bindgen_anon_1.passkey = passkey_val };
+
+    if let Err(e) = ble_sm_inject_io(pk.conn_handle, &mut io) {
+        log::error!("[peripheral] ble_sm_inject_io failed: {e:?}");
+    }
+
+    0
+}
+
+fn handle_enc_change<M: RawMutex>(
+    inner: &PeripheralInner<M>,
+    event: &bindings::ble_gap_event,
+) -> i32 {
+    let enc = unsafe { &event.__bindgen_anon_1.enc_change };
+
+    let result = if enc.status == 0 {
+        log::info!("[peripheral] ENC_CHANGE: link encrypted on handle {}", enc.conn_handle);
+        Ok(())
+    } else {
+        log::warn!("[peripheral] ENC_CHANGE: pairing failed, status={}", enc.status);
+        Err(PairError::PairingFailed { status: enc.status as u32 })
+    };
+
+    // Signal any waiting pair_with_passkey call. If no pairing was in progress
+    // (e.g. peripheral-initiated encryption), pair_result.reset() on the next
+    // pair_with_passkey call will clear this harmlessly.
+    inner.pair_result.signal(result);
 
     0
 }

@@ -169,6 +169,7 @@ struct NimbleConfig {
     gatt: GattConfig,
     l2cap: L2capConfig,
     storage: StorageConfig,
+    security: SecurityConfig,
 }
 
 #[derive(Deserialize)]
@@ -289,6 +290,28 @@ impl Default for StorageConfig {
         Self {
             max_bonds: 3,
             max_cccds: 8,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct SecurityConfig {
+    legacy: bool,
+    sc: bool,
+    mitm: bool,
+    bonding: bool,
+    max_procs: u16,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            legacy: false,
+            sc: false,
+            mitm: false,
+            bonding: false,
+            max_procs: 1,
         }
     }
 }
@@ -521,6 +544,17 @@ fn generate_syscfg_override(config: &NimbleConfig, out_dir: &Path) -> PathBuf {
     .unwrap();
     writeln!(h).unwrap();
 
+    // Security Manager
+    writeln!(h, "/* Security Manager */").unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_LEGACY ({})", config.security.legacy as u8).unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_SC ({})", config.security.sc as u8).unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_MITM ({})", config.security.mitm as u8).unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_BONDING ({})", config.security.bonding as u8).unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_MAX_PROCS ({})", config.security.max_procs).unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_OUR_KEY_DIST (0)").unwrap();
+    writeln!(h, "#define MYNEWT_VAL_BLE_SM_THEIR_KEY_DIST (0)").unwrap();
+    writeln!(h).unwrap();
+
     writeln!(h, "#endif /* NIMBLE_CONFIG_OVERRIDE_H */").unwrap();
 
     let override_path = out_dir.join("nimble_config_override.h");
@@ -554,13 +588,17 @@ fn main() {
 
     // ----- Include paths -----
     // Stubs come FIRST so they shadow system headers (stdint.h, string.h, …).
-    let include_dirs = vec![
+    let mut include_dirs = vec![
         stubs_dir.clone(),
         nimble_dir.join("nimble/include"),
         nimble_dir.join("nimble/host/include"),
         nimble_dir.join("porting/nimble/include"),
         nimble_dir.join("nimble/transport/include"),
     ];
+
+    if config.security.legacy || config.security.sc {
+        include_dirs.push(nimble_dir.join("ext/tinycrypt/include"));
+    }
 
     let exclude_headers = ["porting/nimble/include/syscfg/syscfg.h"];
 
@@ -621,6 +659,12 @@ fn main() {
         .file(nimble_dir.join("porting/nimble/src/nimble_port.c"))
         .file(nimble_dir.join("nimble/transport/src/transport.c"))
         .includes(&include_dirs);
+
+    if config.security.legacy || config.security.sc {
+        cc_build
+            .file(nimble_dir.join("ext/tinycrypt/src/aes_encrypt.c"))
+            .file(nimble_dir.join("ext/tinycrypt/src/utils.c"));
+    }
 
     // Cross-compile for bare-metal RISC-V
     cc_build

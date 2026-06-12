@@ -1,6 +1,6 @@
 use alloc::string::String;
 
-use crate::nimble_sys::NimbleError;
+pub use crate::nimble_sys::NimbleError;
 
 // ── Per-class errors ─────────────────────────────────────────────────────────
 
@@ -85,6 +85,19 @@ pub enum DataError {
     InvalidArgument(String),
 }
 
+/// Errors from BLE pairing (Security Manager).
+#[derive(Debug)]
+pub enum PairError {
+    /// Not connected (pairing requires an active connection).
+    NotConnected,
+    /// `ble_gap_security_initiate()` failed.
+    InitiateFailed(NimbleError),
+    /// The pairing procedure completed with a non-zero status (e.g. wrong passkey).
+    PairingFailed { status: u32 },
+    /// Connection dropped while pairing was in progress.
+    DisconnectedWhileOperation,
+}
+
 /// Internal errors (channel/infrastructure issues).
 #[derive(Debug)]
 pub enum InternalError {
@@ -104,6 +117,7 @@ pub enum Error {
     Scan(ScanError),
     Connect(ConnectError),
     Gatt(GattError),
+    Pair(PairError),
     Data(DataError),
     Internal(InternalError),
 }
@@ -134,6 +148,12 @@ impl From<DataError> for Error {
     }
 }
 
+impl From<PairError> for Error {
+    fn from(e: PairError) -> Self {
+        Self::Pair(e)
+    }
+}
+
 impl From<InternalError> for Error {
     fn from(e: InternalError) -> Self {
         Self::Internal(e)
@@ -153,3 +173,6 @@ pub type ConnectResult<T = ()> = core::result::Result<T, ConnectError>;
 
 /// Result with [`GattError`].
 pub type GattResult<T = ()> = core::result::Result<T, GattError>;
+
+/// Result with [`PairError`].
+pub type PairResult<T = ()> = core::result::Result<T, PairError>;
