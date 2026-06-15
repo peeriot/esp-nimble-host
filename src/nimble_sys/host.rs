@@ -3,10 +3,6 @@ use crate::data::*;
 use super::{NimbleError, NimbleResult, bindings, return_code_to_result};
 
 /// Returns a mutable reference to the global BLE host stack configuration.
-///
-/// # Safety
-///
-/// This function returns a mutable reference to a static variable. Use with care.
 pub fn ble_hs_cfg() -> &'static mut bindings::ble_hs_cfg {
     #[allow(static_mut_refs)]
     unsafe {
