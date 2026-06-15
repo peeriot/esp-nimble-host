@@ -477,7 +477,7 @@ pub unsafe extern "C" fn ble_transport_to_ll_cmd_impl(buf: *mut c_void) -> c_int
     let mut cmd_packet = Vec::new();
     cmd_packet.push(H4_CMD);
     cmd_packet.extend_from_slice(&opcode.to_le_bytes());
-    cmd_packet.push(u8::try_from(pkt_len).unwrap());
+    cmd_packet.push(pkt_len as u8);
     cmd_packet.extend_from_slice(params);
 
     ble_transport_free(buf);
@@ -523,9 +523,14 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
             let mut cur = om;
             while !cur.is_null() {
                 let seg_len = (*cur).om_len as usize;
+                let data_ptr = (*cur).om_data as *const u8;
                 if seg_len != 0 {
-                    let seg = core::slice::from_raw_parts((*cur).om_data as *const u8, seg_len);
-                    packet.extend_from_slice(seg);
+                    if data_ptr.is_null() {
+                        log::error!("[H2C] mbuf segment has len={seg_len} but null data pointer, skipping");
+                    } else {
+                        let seg = core::slice::from_raw_parts(data_ptr, seg_len);
+                        packet.extend_from_slice(seg);
+                    }
                 }
                 cur = (*cur).om_next.sle_next;
             }

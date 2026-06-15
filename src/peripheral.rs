@@ -136,10 +136,25 @@ pub struct OwnedSubscriber<
     const SUBS: usize,
     const PUBS: usize,
 > {
-    // Declaration order is load-bearing: `sub` borrows into a channel owned by
-    // `_inner` and must be dropped first. Rust drops fields in declaration order.
-    sub: Subscriber<'static, M, T, CAP, SUBS, PUBS>,
+    // ManuallyDrop + explicit Drop impl below guarantee `sub` is always dropped
+    // before `_inner`, regardless of field declaration order.
+    sub: core::mem::ManuallyDrop<Subscriber<'static, M, T, CAP, SUBS, PUBS>>,
     _inner: Arc<PeripheralInner<M>>,
+}
+
+impl<
+    M: RawMutex + 'static,
+    T: Clone + 'static,
+    const CAP: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> Drop for OwnedSubscriber<M, T, CAP, SUBS, PUBS>
+{
+    fn drop(&mut self) {
+        // SAFETY: `sub` holds a borrow into the PubSubChannel owned by `_inner`'s
+        // Arc and must be dropped first. `_inner` drops normally after this returns.
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.sub) };
+    }
 }
 
 impl<
@@ -431,13 +446,13 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             .subscription_pub
             .subscriber()
             .map_err(|_| InternalError::ChannelClosed)?;
-        // SAFETY: the `_inner` clone keeps the PubSubChannel alive for as long as the
-        // returned subscriber exists, and `OwnedSubscriber` drops `sub` before `_inner`
-        // (field declaration order), so the extended `'static` lifetime never dangles.
+        // SAFETY: `_inner` keeps the PubSubChannel alive for as long as this
+        // `OwnedSubscriber` exists, and the explicit `Drop` impl drops `sub` before
+        // `_inner`, so the extended `'static` lifetime never dangles.
         let sub: Subscriber<'static, M, (u16, Vec<u8>), 16, 4, 1> =
             unsafe { core::mem::transmute(sub) };
         Ok(OwnedSubscriber {
-            sub,
+            sub: core::mem::ManuallyDrop::new(sub),
             _inner: self.inner.clone(),
         })
     }
@@ -452,12 +467,12 @@ impl<M: RawMutex + 'static> Peripheral<M> {
             .event_pub
             .subscriber()
             .map_err(|_| InternalError::ChannelClosed)?;
-        // SAFETY: see `subscribe` — `_inner` keeps the channel alive and `sub` is
-        // dropped before `_inner`.
+        // SAFETY: see `subscribe` — `_inner` keeps the channel alive and the explicit
+        // `Drop` impl on `OwnedSubscriber` drops `sub` before `_inner`.
         let sub: Subscriber<'static, M, PeripheralEvent, 4, 2, 1> =
             unsafe { core::mem::transmute(sub) };
         Ok(OwnedSubscriber {
-            sub,
+            sub: core::mem::ManuallyDrop::new(sub),
             _inner: self.inner.clone(),
         })
     }
