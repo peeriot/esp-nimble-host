@@ -335,6 +335,10 @@ fn load_config() -> NimbleConfig {
     let search_paths: Vec<PathBuf> = [
         std::env::var("NIMBLE_CONFIG_DIR").ok().map(PathBuf::from),
         std::env::var("CARGO_WORKSPACE_DIR").ok().map(PathBuf::from),
+        // CARGO_MANIFEST_DIR points to this crate's root — useful when building
+        // the library directly (e.g. `cargo clippy` in the repo) where
+        // CARGO_WORKSPACE_DIR may not be set.
+        std::env::var("CARGO_MANIFEST_DIR").ok().map(PathBuf::from),
     ]
     .into_iter()
     .flatten()
