@@ -1,6 +1,6 @@
 use core::ffi::c_void;
 
-use super::{NimbleError, NimbleResult, bindings, return_code_to_result};
+use super::{NimbleResult, bindings, return_code_to_result};
 
 /// Allocates a buffer for an HCI event from the transport layer.
 ///
@@ -48,7 +48,6 @@ pub fn ble_transport_to_hs_evt(
     let rc = unsafe { bindings::ble_transport_to_hs_evt_impl(ev as *mut c_void) };
     if rc != 0 {
         ble_transport_free(ev as *mut c_void);
-        return Err(NimbleError::OsError);
     }
-    Ok(())
+    return_code_to_result(rc as u32, ())
 }

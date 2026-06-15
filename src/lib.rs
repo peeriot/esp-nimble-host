@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 
 pub use uuid;
 
-use crate::data::{BleGapDiscParams, RawAdvertisement};
+use crate::data::{BleAddr, BleGapDiscParams, RawAdvertisement};
 // Re-export public types
 pub use crate::data::Advertisement;
 use crate::error::{InternalError, ScanError, ScanResult};
@@ -184,7 +184,7 @@ impl<M: RawMutex + 'static> Scanner<M> {
             self.params = p;
         }
 
-        let own_addr_type = OWN_ADDR_TYPE.load(Ordering::SeqCst);
+        let own_addr_type = OWN_ADDR_TYPE.load(Ordering::Acquire);
         let cb_arg = self.inner as *const ScannerInner<M> as *mut c_void;
 
         ble_gap_disc(
@@ -248,7 +248,7 @@ extern "C" fn scan_event_handler<M: RawMutex + 'static>(
     let event = unsafe { *event };
 
     match event.type_ as u32 {
-        BLE_GAP_EVENT_DISC | BLE_GAP_EVENT_EXT_DISC => {
+        BLE_GAP_EVENT_DISC => {
             let disc: &ble_gap_disc_desc = unsafe { &event.__bindgen_anon_1.disc };
             // Only publish advertisements whose AD structure NimBLE can parse; raw bytes
             // are forwarded as-is so callers can parse manufacturer data themselves.
@@ -268,6 +268,10 @@ extern "C" fn scan_event_handler<M: RawMutex + 'static>(
                 }
             }
         }
+        BLE_GAP_EVENT_EXT_DISC => {
+            // Extended advertising is disabled by default (BLE_EXT_ADV=0) and not supported yet.
+            log::warn!("[scanner] BLE_GAP_EVENT_EXT_DISC not supported yet; ignoring");
+        }
         BLE_GAP_EVENT_DISC_COMPLETE => {
             log::info!("[scanner] NimBLE stopped scanning (DISC_COMPLETE)");
         }
@@ -285,6 +289,17 @@ const MAX_CMD_PARAMS: usize = 255;
 
 const H4_CMD: u8 = 0x01;
 const H4_ACL: u8 = 0x02;
+const H4_EVT: u8 = 0x04;
+
+/// HCI H4 packet type byte: the first byte of a controller→host packet.
+#[repr(u8)]
+#[derive(Debug, Default, num_enum::FromPrimitive)]
+enum PacketType {
+    #[default]
+    Invalid = 0xff,
+    Acl = H4_ACL,
+    Event = H4_EVT,
+}
 
 pub struct HostTransport {
     controller: BleConnector<'static>,
@@ -337,15 +352,6 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
         let packet_bytes = &buf[..read];
 
         log::trace!("[C2H] Incoming packet {:02x?}", &packet_bytes);
-
-        #[repr(u8)]
-        #[derive(Debug, Default, num_enum::FromPrimitive)]
-        enum PacketType {
-            #[default]
-            Invalid = 0xff,
-            Acl = 0x02,
-            Event = 0x04,
-        }
 
         let packet_type = PacketType::from(packet_bytes[0]);
 
@@ -568,8 +574,8 @@ unsafe extern "C" fn on_sync() {
 
     match ble_hs_id_copy_addr(addr_type) {
         Ok(addr) => log::info!(
-            "BLE address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, Type: {addr_type}",
-            addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]
+            "BLE address: {}, Type: {addr_type}",
+            BleAddr::new(addr_type, addr)
         ),
         Err(e) => log::warn!("[BLE] on_sync: failed to read own address: {e:?}"),
     }
