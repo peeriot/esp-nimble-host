@@ -661,7 +661,7 @@ fn handle_passkey_action<M: RawMutex>(
     let passkey_val = inner.static_passkey.load(Ordering::Acquire);
     let mut io: bindings::ble_sm_io = unsafe { core::mem::zeroed() };
     io.action = action as u8;  // INPUT or DISP — same injection mechanism
-    unsafe { io.__bindgen_anon_1.passkey = passkey_val };
+    io.__bindgen_anon_1.passkey = passkey_val;
 
     if let Err(e) = ble_sm_inject_io(pk.conn_handle, &mut io) {
         log::error!("[peripheral] ble_sm_inject_io failed: {e:?}");
