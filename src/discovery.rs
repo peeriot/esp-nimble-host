@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use uuid::Uuid;
 
@@ -7,9 +7,10 @@ use crate::{
     data::{ConnectionHandle, nimble_uuid_to_uuid, uuid_to_nimble_uuid},
     error::{GattError, GattResult},
     nimble_sys::{
+        NimbleError,
         bindings::{BLE_HS_EDONE, ble_gatt_chr, ble_gatt_dsc, ble_gatt_error, ble_gatt_svc},
         ble_gattc_disc_all_chrs, ble_gattc_disc_all_dscs, ble_gattc_disc_all_svcs,
-        ble_gattc_disc_svc_by_uuid,
+        ble_gattc_disc_svc_by_uuid, return_code_to_result,
     },
     peripheral_operation::{PeripheralOperation, peripheral_operation},
     service::Service,
@@ -135,96 +136,111 @@ impl ServiceCharacteristicsDiscovery {
 
 // ── NimBLE GATT discovery primitives ─────────────────────────────────────────
 
-async fn nimble_discover_services(conn_handle: ConnectionHandle) -> GattResult<Vec<Service>> {
-    let (operation, operation_handle) =
-        peripheral_operation::<Vec<Service>, CriticalSectionRawMutex>(conn_handle, Vec::new());
+/// Converts a terminal discovery callback status into a `GattResult`.
+///
+/// `BLE_HS_EDONE` means all items were delivered (success); any other non-zero
+/// status is a genuine error wrapped via `err_map`.
+fn disc_terminal_result(status: i32, err_map: fn(NimbleError) -> GattError) -> GattResult {
+    if status == BLE_HS_EDONE as i32 {
+        return Ok(());
+    }
+    Err(err_map(return_code_to_result(status as u32, ()).unwrap_err()))
+}
 
-    ble_gattc_disc_all_svcs(
+async fn nimble_discover_services(conn_handle: ConnectionHandle) -> GattResult<Vec<Service>> {
+    let (op_box, handle) =
+        peripheral_operation::<Vec<Service>, CriticalSectionRawMutex>(conn_handle, Vec::new());
+    let op_ptr = Box::into_raw(op_box);
+
+    if let Err(e) = ble_gattc_disc_all_svcs(
         conn_handle,
         Some(service_discovered_cb::<CriticalSectionRawMutex>),
-        &operation as *const PeripheralOperation<Vec<Service>, _> as _,
-    )
-    .map_err(GattError::ServiceDiscoveryFailed)?;
+        op_ptr as _,
+    ) {
+        drop(unsafe { Box::from_raw(op_ptr) });
+        return Err(GattError::ServiceDiscoveryFailed(e));
+    }
 
-    operation_handle.join().await?;
-    operation
-        .take_context()
-        .ok_or(GattError::NoServicesDiscovered)
+    handle.join().await?;
+    handle.take_context().ok_or(GattError::NoServicesDiscovered)
 }
 
 async fn nimble_discover_service_by_uuid(
     conn_handle: ConnectionHandle,
     service_uuid: &Uuid,
 ) -> GattResult<Vec<Service>> {
-    let (operation, operation_handle) =
+    let (op_box, handle) =
         peripheral_operation::<Vec<Service>, CriticalSectionRawMutex>(conn_handle, Vec::new());
+    let op_ptr = Box::into_raw(op_box);
 
-    ble_gattc_disc_svc_by_uuid(
+    if let Err(e) = ble_gattc_disc_svc_by_uuid(
         conn_handle,
         &uuid_to_nimble_uuid(service_uuid),
         Some(service_discovered_cb::<CriticalSectionRawMutex>),
-        &operation as *const PeripheralOperation<Vec<Service>, _> as _,
-    )
-    .map_err(GattError::ServiceDiscoveryFailed)?;
+        op_ptr as _,
+    ) {
+        drop(unsafe { Box::from_raw(op_ptr) });
+        return Err(GattError::ServiceDiscoveryFailed(e));
+    }
 
-    operation_handle.join().await?;
-    operation
-        .take_context()
-        .ok_or(GattError::NoServicesDiscovered)
+    handle.join().await?;
+    handle.take_context().ok_or(GattError::NoServicesDiscovered)
 }
 
 extern "C" fn service_discovered_cb<M>(
     conn_handle: ConnectionHandle,
     error: *const ble_gatt_error,
     service: *const ble_gatt_svc,
-    operation: *mut core::ffi::c_void,
+    arg: *mut core::ffi::c_void,
 ) -> i32
 where
     M: embassy_sync::blocking_mutex::raw::RawMutex,
 {
-    if error.is_null() || operation.is_null() {
-        log::error!("service_discovered_cb received null pointer for operation/error");
+    if error.is_null() || arg.is_null() {
+        log::error!("service_discovered_cb received null pointer for arg/error");
         return -1;
-    }
-
-    let operation = unsafe { &*(operation as *const PeripheralOperation<Vec<Service>, M>) };
-    if conn_handle != operation.conn_handle() {
-        return 0;
     }
 
     let error = unsafe { &*error };
 
+    let is_ours = {
+        let op = unsafe { &*(arg as *const PeripheralOperation<Vec<Service>, M>) };
+        conn_handle == op.conn_handle()
+    };
+    if !is_ours {
+        return 0;
+    }
+
     if error.status == 0 {
+        // Non-terminal: accumulate service into context.
         if service.is_null() {
             log::error!("service_discovered_cb received null pointer for service");
             return -1;
         }
-
+        let op = unsafe { &*(arg as *const PeripheralOperation<Vec<Service>, M>) };
         let service = unsafe { &*service };
         match nimble_uuid_to_uuid(&service.uuid) {
             Ok(uuid) => {
-                operation.context().lock(|v| {
-                    v.borrow_mut().push(Service::new(
-                        uuid,
-                        service.start_handle,
-                        service.end_handle,
-                    ))
+                op.context().lock(|v| {
+                    v.borrow_mut().push(Service::new(uuid, service.start_handle, service.end_handle))
                 });
             }
-            Err(e) => {
-                operation.send_finished(Err(e.into()));
+            Err(_) => {
+                // Option A: return non-zero so NimBLE cancels and re-enters with an error status.
+                log::warn!("service_discovered_cb: failed to parse UUID");
+                return -1;
             }
         }
         return 0;
     }
 
-    if error.status == (BLE_HS_EDONE as _) {
-        operation.send_finished(Ok(()));
-        return 0;
-    }
-
-    log::warn!("service discovery error status={}", error.status);
-    error.status as _
+    // Terminal call (EDONE or genuine error) — reconstitute and drop the Box.
+    let op_box = unsafe { Box::from_raw(arg as *mut PeripheralOperation<Vec<Service>, M>) };
+    op_box.send_finished(disc_terminal_result(
+        error.status as i32,
+        GattError::ServiceDiscoveryFailed,
+    ));
+    0
 }
 
 async fn nimble_discover_characteristics(
@@ -232,22 +248,25 @@ async fn nimble_discover_characteristics(
     start_handle: u16,
     end_handle: u16,
 ) -> GattResult<Vec<Characteristic>> {
-    let (operation, operation_handle) = peripheral_operation::<
-        Vec<Characteristic>,
-        CriticalSectionRawMutex,
-    >(conn_handle, Vec::new());
+    let (op_box, handle) = peripheral_operation::<Vec<Characteristic>, CriticalSectionRawMutex>(
+        conn_handle,
+        Vec::new(),
+    );
+    let op_ptr = Box::into_raw(op_box);
 
-    ble_gattc_disc_all_chrs(
+    if let Err(e) = ble_gattc_disc_all_chrs(
         conn_handle,
         start_handle,
         end_handle,
         Some(characteristic_disc_cb::<CriticalSectionRawMutex>),
-        &operation as *const PeripheralOperation<Vec<Characteristic>, _> as _,
-    )
-    .map_err(GattError::CharacteristicDiscoveryFailed)?;
+        op_ptr as _,
+    ) {
+        drop(unsafe { Box::from_raw(op_ptr) });
+        return Err(GattError::CharacteristicDiscoveryFailed(e));
+    }
 
-    operation_handle.join().await?;
-    operation
+    handle.join().await?;
+    handle
         .take_context()
         .ok_or(GattError::NoCharacteristicsDiscovered)
 }
@@ -256,46 +275,57 @@ extern "C" fn characteristic_disc_cb<M>(
     conn_handle: ConnectionHandle,
     error: *const ble_gatt_error,
     chr: *const ble_gatt_chr,
-    operation: *mut core::ffi::c_void,
+    arg: *mut core::ffi::c_void,
 ) -> i32
 where
     M: embassy_sync::blocking_mutex::raw::RawMutex,
 {
-    if error.is_null() || operation.is_null() {
+    if error.is_null() || arg.is_null() {
         log::error!("characteristic_disc_cb received null pointer");
         return -1;
     }
 
-    let operation = unsafe { &*(operation as *const PeripheralOperation<Vec<Characteristic>, M>) };
-    if conn_handle != operation.conn_handle() {
+    let error = unsafe { &*error };
+
+    let is_ours = {
+        let op = unsafe { &*(arg as *const PeripheralOperation<Vec<Characteristic>, M>) };
+        conn_handle == op.conn_handle()
+    };
+    if !is_ours {
         return 0;
     }
 
-    let error = unsafe { &*error };
-
     if error.status == 0 {
+        // Non-terminal: accumulate characteristic into context.
         if chr.is_null() {
             log::error!("characteristic_disc_cb received null pointer for chr");
             return -1;
         }
-
+        let op = unsafe { &*(arg as *const PeripheralOperation<Vec<Characteristic>, M>) };
         let chr = unsafe { &*chr };
         match nimble_uuid_to_uuid(&chr.uuid) {
             Ok(uuid) => {
-                operation.context().lock(|v| {
+                op.context().lock(|v| {
                     v.borrow_mut()
                         .push(Characteristic::new(uuid, chr.val_handle, chr.def_handle));
                 });
             }
-            Err(e) => {
-                operation.send_finished(Err(e.into()));
+            Err(_) => {
+                log::warn!("characteristic_disc_cb: failed to parse UUID");
+                return -1;
             }
         }
         return 0;
     }
 
-    operation.send_finished(Ok(()));
-    error.status as _
+    // Terminal call — reconstitute and drop the Box.
+    let op_box =
+        unsafe { Box::from_raw(arg as *mut PeripheralOperation<Vec<Characteristic>, M>) };
+    op_box.send_finished(disc_terminal_result(
+        error.status as i32,
+        GattError::CharacteristicDiscoveryFailed,
+    ));
+    0
 }
 
 async fn nimble_discover_characteristic_descriptors(
@@ -303,20 +333,23 @@ async fn nimble_discover_characteristic_descriptors(
     start_handle: u16,
     end_handle: u16,
 ) -> GattResult<Vec<Descriptor>> {
-    let (operation, operation_handle) =
+    let (op_box, handle) =
         peripheral_operation::<Vec<Descriptor>, CriticalSectionRawMutex>(conn_handle, Vec::new());
+    let op_ptr = Box::into_raw(op_box);
 
-    ble_gattc_disc_all_dscs(
+    if let Err(e) = ble_gattc_disc_all_dscs(
         conn_handle,
         start_handle,
         end_handle,
         Some(characteristic_descriptor_disc_cb::<CriticalSectionRawMutex>),
-        &operation as *const PeripheralOperation<Vec<Descriptor>, _> as _,
-    )
-    .map_err(GattError::DescriptorDiscoveryFailed)?;
+        op_ptr as _,
+    ) {
+        drop(unsafe { Box::from_raw(op_ptr) });
+        return Err(GattError::DescriptorDiscoveryFailed(e));
+    }
 
-    operation_handle.join().await?;
-    operation
+    handle.join().await?;
+    handle
         .take_context()
         .ok_or(GattError::NoDescriptorsDiscovered)
 }
@@ -326,43 +359,53 @@ extern "C" fn characteristic_descriptor_disc_cb<M>(
     error: *const ble_gatt_error,
     _char_val_handle: u16,
     dsc: *const ble_gatt_dsc,
-    operation: *mut core::ffi::c_void,
+    arg: *mut core::ffi::c_void,
 ) -> i32
 where
     M: embassy_sync::blocking_mutex::raw::RawMutex,
 {
-    if error.is_null() || operation.is_null() {
+    if error.is_null() || arg.is_null() {
         log::error!("characteristic_descriptor_disc_cb received null pointer");
         return -1;
     }
 
-    let operation = unsafe { &*(operation as *const PeripheralOperation<Vec<Descriptor>, M>) };
-    if conn_handle != operation.conn_handle() {
+    let error = unsafe { &*error };
+
+    let is_ours = {
+        let op = unsafe { &*(arg as *const PeripheralOperation<Vec<Descriptor>, M>) };
+        conn_handle == op.conn_handle()
+    };
+    if !is_ours {
         return 0;
     }
 
-    let error = unsafe { &*error };
-
     if error.status == 0 {
+        // Non-terminal: accumulate descriptor into context.
         if dsc.is_null() {
             log::error!("characteristic_descriptor_disc_cb received null pointer for dsc");
             return -1;
         }
-
+        let op = unsafe { &*(arg as *const PeripheralOperation<Vec<Descriptor>, M>) };
         let dsc = unsafe { &*dsc };
         match nimble_uuid_to_uuid(&dsc.uuid) {
             Ok(uuid) => {
-                operation.context().lock(|v| {
+                op.context().lock(|v| {
                     v.borrow_mut().push(Descriptor::new(uuid, dsc.handle));
                 });
             }
-            Err(e) => {
-                operation.send_finished(Err(e.into()));
+            Err(_) => {
+                log::warn!("characteristic_descriptor_disc_cb: failed to parse UUID");
+                return -1;
             }
         }
         return 0;
     }
 
-    operation.send_finished(Ok(()));
-    error.status as _
+    // Terminal call — reconstitute and drop the Box.
+    let op_box = unsafe { Box::from_raw(arg as *mut PeripheralOperation<Vec<Descriptor>, M>) };
+    op_box.send_finished(disc_terminal_result(
+        error.status as i32,
+        GattError::DescriptorDiscoveryFailed,
+    ));
+    0
 }

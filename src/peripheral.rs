@@ -286,21 +286,25 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         }
     }
 
-    pub async fn exchange_mtu(&self) -> GattResult {
+    pub async fn exchange_mtu(&self) -> GattResult<u16> {
         let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(GattError::NotConnected);
         };
 
-        let (operation, operation_handle) = peripheral_operation::<u16, M>(conn_handle, 0);
+        let (op_box, handle) = peripheral_operation::<u16, M>(conn_handle, 0);
+        let op_ptr = Box::into_raw(op_box);
 
-        ble_gattc_exchange_mtu(
+        if let Err(e) = ble_gattc_exchange_mtu(
             conn_handle,
             Some(Self::exchange_mtu_callback),
-            &operation as *const PeripheralOperation<u16, M> as _,
-        )
-        .map_err(GattError::MtuExchangeFailed)?;
+            op_ptr as _,
+        ) {
+            drop(unsafe { Box::from_raw(op_ptr) });
+            return Err(GattError::MtuExchangeFailed(e));
+        }
 
-        operation_handle.join().await
+        handle.join().await?;
+        handle.take_context().ok_or(GattError::NoData)
     }
 
     /// Discover a specific service by UUID and cache it in `self.services`.
@@ -505,23 +509,27 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         conn_handle: u16,
         error: *const bindings::ble_gatt_error,
         mtu: u16,
-        operation: *mut core::ffi::c_void,
+        arg: *mut core::ffi::c_void,
     ) -> i32 {
-        let operation = unsafe { &*(operation as *const PeripheralOperation<u16, M>) };
         let error = unsafe { &*error };
 
-        if conn_handle != operation.conn_handle() {
+        let is_ours = {
+            let op = unsafe { &*(arg as *const PeripheralOperation<u16, M>) };
+            conn_handle == op.conn_handle()
+        };
+        if !is_ours {
             return 0;
         }
 
         let result =
             return_code_to_result(error.status as u32, ()).map_err(GattError::MtuExchangeFailed);
 
+        // Terminal call — reconstitute and drop the Box.
+        let op_box = unsafe { Box::from_raw(arg as *mut PeripheralOperation<u16, M>) };
         if result.is_ok() {
-            operation.context().lock(|v| *v.borrow_mut() = mtu);
+            op_box.context().lock(|v| *v.borrow_mut() = mtu);
         }
-
-        operation.send_finished(result);
+        op_box.send_finished(result);
         error.status as _
     }
 
