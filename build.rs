@@ -549,11 +549,36 @@ fn generate_syscfg_override(config: &NimbleConfig, out_dir: &Path) -> PathBuf {
 
     // Security Manager
     writeln!(h, "/* Security Manager */").unwrap();
-    writeln!(h, "#define MYNEWT_VAL_BLE_SM_LEGACY ({})", config.security.legacy as u8).unwrap();
-    writeln!(h, "#define MYNEWT_VAL_BLE_SM_SC ({})", config.security.sc as u8).unwrap();
-    writeln!(h, "#define MYNEWT_VAL_BLE_SM_MITM ({})", config.security.mitm as u8).unwrap();
-    writeln!(h, "#define MYNEWT_VAL_BLE_SM_BONDING ({})", config.security.bonding as u8).unwrap();
-    writeln!(h, "#define MYNEWT_VAL_BLE_SM_MAX_PROCS ({})", config.security.max_procs).unwrap();
+    writeln!(
+        h,
+        "#define MYNEWT_VAL_BLE_SM_LEGACY ({})",
+        config.security.legacy as u8
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "#define MYNEWT_VAL_BLE_SM_SC ({})",
+        config.security.sc as u8
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "#define MYNEWT_VAL_BLE_SM_MITM ({})",
+        config.security.mitm as u8
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "#define MYNEWT_VAL_BLE_SM_BONDING ({})",
+        config.security.bonding as u8
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "#define MYNEWT_VAL_BLE_SM_MAX_PROCS ({})",
+        config.security.max_procs
+    )
+    .unwrap();
     writeln!(h, "#define MYNEWT_VAL_BLE_SM_OUR_KEY_DIST (0)").unwrap();
     writeln!(h, "#define MYNEWT_VAL_BLE_SM_THEIR_KEY_DIST (0)").unwrap();
     writeln!(h).unwrap();

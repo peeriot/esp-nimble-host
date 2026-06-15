@@ -16,7 +16,9 @@ use crate::{
     characteristic::{Characteristic, Descriptor, read_attribute, write_attribute},
     data::BleAddr,
     discovery::{ServiceCharacteristicsDiscovery, ServiceDiscovery},
-    error::{ConnectError, ConnectResult, GattError, GattResult, InternalError, PairError, PairResult},
+    error::{
+        ConnectError, ConnectResult, GattError, GattResult, InternalError, PairError, PairResult,
+    },
     nimble_sys::*,
     peripheral_operation::{PeripheralOperation, peripheral_operation},
     service::Service,
@@ -660,7 +662,7 @@ fn handle_passkey_action<M: RawMutex>(
 
     let passkey_val = inner.static_passkey.load(Ordering::Acquire);
     let mut io: bindings::ble_sm_io = unsafe { core::mem::zeroed() };
-    io.action = action as u8;  // INPUT or DISP — same injection mechanism
+    io.action = action as u8; // INPUT or DISP — same injection mechanism
     io.__bindgen_anon_1.passkey = passkey_val;
 
     if let Err(e) = ble_sm_inject_io(pk.conn_handle, &mut io) {
@@ -677,11 +679,19 @@ fn handle_enc_change<M: RawMutex>(
     let enc = unsafe { &event.__bindgen_anon_1.enc_change };
 
     let result = if enc.status == 0 {
-        log::info!("[peripheral] ENC_CHANGE: link encrypted on handle {}", enc.conn_handle);
+        log::info!(
+            "[peripheral] ENC_CHANGE: link encrypted on handle {}",
+            enc.conn_handle
+        );
         Ok(())
     } else {
-        log::warn!("[peripheral] ENC_CHANGE: pairing failed, status={}", enc.status);
-        Err(PairError::PairingFailed { status: enc.status as u32 })
+        log::warn!(
+            "[peripheral] ENC_CHANGE: pairing failed, status={}",
+            enc.status
+        );
+        Err(PairError::PairingFailed {
+            status: enc.status as u32,
+        })
     };
 
     // Signal any waiting pair_with_passkey call. If no pairing was in progress
