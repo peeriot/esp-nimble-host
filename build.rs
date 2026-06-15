@@ -322,12 +322,11 @@ impl Default for SecurityConfig {
 ///   1. `NIMBLE_CONFIG_DIR` env var — set this in `.cargo/config.toml` of the
 ///      consuming crate for full control over the path (e.g. in a deep workspace).
 ///   2. Workspace root (`CARGO_WORKSPACE_DIR`) — works automatically when the
-///      consuming crate lives in a cargo workspace (cargo 1.77+).
-///   3. Built-in defaults — when neither of the above yields a file.
-///
-/// Note: `CARGO_MANIFEST_DIR` inside a dependency's build.rs always points to
-/// the dependency itself, never the consuming crate — it is intentionally not
-/// in the search list.
+///      consuming crate places `nimble-config.toml` at its workspace root.
+///   3. `CARGO_MANIFEST_DIR` — this crate's own root; used when building the
+///      library directly (e.g. `cargo clippy` in the repo) where
+///      `CARGO_WORKSPACE_DIR` may not be set.
+///   4. Built-in defaults — when none of the above yields a file.
 fn load_config() -> NimbleConfig {
     // Tell cargo to re-run if the override var changes.
     println!("cargo:rerun-if-env-changed=NIMBLE_CONFIG_DIR");
