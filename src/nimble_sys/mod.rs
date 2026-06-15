@@ -7,6 +7,7 @@ mod gatts;
 pub mod host;
 pub mod nimble_port;
 mod sm;
+mod transport;
 
 use thiserror::Error;
 
@@ -24,7 +25,7 @@ pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/nimble_host_bindings.rs"));
 }
 
-pub(crate) use self::{att::*, gap::*, gattc::*, host::*, nimble_port::*, sm::*};
+pub(crate) use self::{att::*, gap::*, gattc::*, host::*, nimble_port::*, sm::*, transport::*};
 
 #[derive(Debug, Error)]
 pub enum NimbleError {
