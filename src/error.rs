@@ -83,6 +83,8 @@ pub enum DataError {
     UuidConversion(String),
     /// Invalid argument.
     InvalidArgument(String),
+    /// `ble_hs_adv_parse_fields()` failed.
+    AdvParseFields(NimbleError),
 }
 
 /// Errors from BLE pairing (Security Manager).

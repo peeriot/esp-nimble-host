@@ -3,7 +3,10 @@ use core::fmt::Debug;
 
 use uuid::Uuid;
 
-use crate::{error::DataError, nimble_sys::bindings};
+use crate::{
+    error::DataError,
+    nimble_sys::{bindings, return_code_to_result},
+};
 
 /// BLE connection handle type.
 pub type ConnectionHandle = u16;
@@ -414,23 +417,25 @@ impl Advertisement {
     }
 }
 
-impl From<RawAdvertisement> for Advertisement {
-    // TODO: Convert to try_from, since it can fail
-    fn from(value: RawAdvertisement) -> Self {
+impl TryFrom<RawAdvertisement> for Advertisement {
+    type Error = DataError;
+
+    fn try_from(value: RawAdvertisement) -> Result<Self, Self::Error> {
         let mut fields: bindings::ble_hs_adv_fields = unsafe { core::mem::zeroed() };
-        let _ret = unsafe {
+        let ret = unsafe {
             bindings::ble_hs_adv_parse_fields(
                 &mut fields,
                 value.data.as_ptr(),
                 value.data.len() as u8,
             )
         };
+        return_code_to_result(ret as u32, ()).map_err(DataError::AdvParseFields)?;
         let fields = HostAdvertismentFields::from(fields);
-        Self {
+        Ok(Self {
             addr: value.addr,
             rssi: value.rssi,
             fields,
-        }
+        })
     }
 }
 
