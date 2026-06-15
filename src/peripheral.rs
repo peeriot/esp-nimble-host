@@ -466,6 +466,9 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         event: *mut bindings::ble_gap_event,
         param: *mut core::ffi::c_void,
     ) -> i32 {
+        if event.is_null() || param.is_null() {
+            panic!("gap_event_handler: null pointer: event={event:p}, param={param:p}");
+        }
         let inner = unsafe { &*(param as *const PeripheralInner<M>) };
         let event = unsafe { *event };
 
@@ -511,6 +514,9 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         mtu: u16,
         arg: *mut core::ffi::c_void,
     ) -> i32 {
+        if error.is_null() || arg.is_null() {
+            panic!("exchange_mtu_callback: null pointer: error={error:p}, arg={arg:p}");
+        }
         let error = unsafe { &*error };
 
         let is_ours = {

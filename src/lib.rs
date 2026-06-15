@@ -322,7 +322,13 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
     let mut buf = [0; 512];
     loop {
         log::trace!("[C2H] waiting for HCI ready");
-        let read = ble_host.controller.read_async(&mut buf).await.unwrap();
+        let read = match ble_host.controller.read_async(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                log::error!("[C2H] controller read failed: {e:?}");
+                continue;
+            }
+        };
 
         if read == 0 {
             continue;
@@ -347,17 +353,19 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
             PacketType::Acl => {
                 // H4 ACL header: type(1) + handle(2) + len(2)
                 if packet_bytes.len() < 1 + 2 + 2 {
-                    panic!("short ACL packet");
+                    log::error!("[C2H] short ACL packet ({} bytes), dropping", packet_bytes.len());
+                    continue;
                 }
 
                 let data_len = u16::from_le_bytes([packet_bytes[3], packet_bytes[4]]) as usize;
                 let expected = 1 + 2 + 2 + data_len;
                 if packet_bytes.len() < expected {
-                    panic!(
-                        "truncated ACL packet: got {}, expected {}",
+                    log::error!(
+                        "[C2H] truncated ACL packet: got {}, expected {}, dropping",
                         packet_bytes.len(),
                         expected
                     );
+                    continue;
                 }
 
                 // Build buffer with 4-byte HCI ACL header + payload
@@ -376,32 +384,35 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
                 // Append HCI ACL header and payload
                 if os_mbuf_append_slice(om, &hdr).is_err() {
                     let _ = os_mbuf_free_chain(om);
-                    panic!("os_mbuf_append hdr failed");
+                    log::error!("[C2H] os_mbuf_append hdr failed, dropping ACL packet");
+                    continue;
                 }
 
                 let payload = &packet_bytes[5..5 + data_len];
                 if os_mbuf_append_slice(om, payload).is_err() {
                     let _ = os_mbuf_free_chain(om);
-                    panic!("os_mbuf_append payload failed");
+                    log::error!("[C2H] os_mbuf_append payload failed, dropping ACL packet");
+                    continue;
                 }
 
-                // Deliver to host
+                // Deliver to host; on failure caller must free the mbuf.
                 if ble_transport_to_hs_acl(om).is_err() {
                     let _ = os_mbuf_free_chain(om);
-                    panic!("ble_transport_to_hs_acl_impl failed");
+                    log::error!("[C2H] ble_transport_to_hs_acl failed, dropping ACL packet");
+                    continue;
                 }
             }
             PacketType::Event => {
                 const PAYLOAD_OFFSET: usize = 3;
                 let payload_len = packet_bytes[2] as usize;
 
-                // First of all let's make sure that we have enough space for our data, by checking
-                // against NimBLE's config
                 if payload_len > MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE as usize - 2 {
-                    panic!(
-                        "Event data too long. MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE={}, payload_len={}",
-                        MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE, payload_len
+                    log::error!(
+                        "[C2H] event payload too long ({} bytes, max {}), dropping",
+                        payload_len,
+                        MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE - 2
                     );
+                    continue;
                 }
 
                 // Try to allocate memory for the event
@@ -412,11 +423,18 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
                     }
                 };
 
-                ble_transport_to_hs_evt(hci_ev, packet_bytes[1], &packet_bytes[PAYLOAD_OFFSET..])
-                    .expect("Failed to send event to Host");
+                // On failure ble_transport_to_hs_evt frees hci_ev automatically.
+                if let Err(e) = ble_transport_to_hs_evt(
+                    hci_ev,
+                    packet_bytes[1],
+                    &packet_bytes[PAYLOAD_OFFSET..],
+                ) {
+                    log::error!("[C2H] ble_transport_to_hs_evt failed: {e:?}");
+                    continue;
+                }
             }
             PacketType::Invalid => {
-                todo!("Packet type not handled yet: {:02x}", packet_bytes[0])
+                log::warn!("[C2H] unknown H4 packet type 0x{:02x}, dropping", packet_bytes[0]);
             }
         }
     }
@@ -525,31 +543,32 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
 }
 
 /// # Safety
-/// Called only by the NimBLE host task. ISO data is not supported; always panics.
+/// Called only by the NimBLE host task. ISO data is not supported.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ble_transport_to_ll_iso_impl(_om: *mut os_mbuf) -> c_int {
-    todo!()
+    crate::nimble_sys::bindings::BLE_HS_ENOTSUP as _
 }
 
 /// NimBLE's callback which indicates the Host and the Controller are now synced
 #[unsafe(no_mangle)]
 unsafe extern "C" fn on_sync() {
-    let addr_type = ble_hs_id_infer_auto(false).expect("Failed to infer BLE address type");
+    let addr_type = match ble_hs_id_infer_auto(false) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("[BLE] on_sync: ble_hs_id_infer_auto failed: {e:?}; not signaling sync");
+            return;
+        }
+    };
     OWN_ADDR_TYPE.store(addr_type, Ordering::Release);
 
-    let addr = ble_hs_id_copy_addr(addr_type).expect("Failed to set BLE address");
+    match ble_hs_id_copy_addr(addr_type) {
+        Ok(addr) => log::info!(
+            "BLE address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, Type: {addr_type}",
+            addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]
+        ),
+        Err(e) => log::warn!("[BLE] on_sync: failed to read own address: {e:?}"),
+    }
 
-    log::info!(
-        "BLE address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, Type: {addr_type}",
-        addr[5],
-        addr[4],
-        addr[3],
-        addr[2],
-        addr[1],
-        addr[0]
-    );
-
-    // Signal that we can now use the host API
     HOST_CONTROLLER_SYNCED.store(true, Ordering::Release);
     SYNC_WAKER.wake();
 }
@@ -557,8 +576,6 @@ unsafe extern "C" fn on_sync() {
 /// NimBLE's callback which indicates a reset of the state
 #[unsafe(no_mangle)]
 unsafe extern "C" fn on_reset(reason: c_int) {
-    log::trace!("on_reset: reason {:?}", reason);
-    if reason == 19 {
-        panic!("Host lost sync with controller");
-    }
+    log::error!("[BLE] host reset by controller, reason={reason}; clearing sync");
+    HOST_CONTROLLER_SYNCED.store(false, Ordering::Release);
 }

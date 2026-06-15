@@ -209,70 +209,93 @@ impl HostAdvertisementFields {
 impl From<bindings::ble_hs_adv_fields> for HostAdvertisementFields {
     fn from(value: bindings::ble_hs_adv_fields) -> Self {
         let uuids16 = if value.num_uuids16 > 0 {
-            let uuids16_slice = unsafe {
-                core::slice::from_raw_parts::<bindings::ble_uuid16_t>(
-                    value.uuids16,
-                    value.num_uuids16 as usize,
-                )
-            };
-
-            uuids16_slice
-                .iter()
-                .map(|uuid16| uuid_from_u16(uuid16.value))
-                .collect()
+            if value.uuids16.is_null() {
+                log::warn!("HostAdvertisementFields: num_uuids16={} but uuids16 is null", value.num_uuids16);
+                alloc::vec::Vec::new()
+            } else {
+                let uuids16_slice = unsafe {
+                    core::slice::from_raw_parts::<bindings::ble_uuid16_t>(
+                        value.uuids16,
+                        value.num_uuids16 as usize,
+                    )
+                };
+                uuids16_slice
+                    .iter()
+                    .map(|uuid16| uuid_from_u16(uuid16.value))
+                    .collect()
+            }
         } else {
             alloc::vec::Vec::new()
         };
 
         let uuids32 = if value.num_uuids32 > 0 {
-            let uuids32_slice = unsafe {
-                core::slice::from_raw_parts::<bindings::ble_uuid32_t>(
-                    value.uuids32,
-                    value.num_uuids32 as usize,
-                )
-            };
-
-            uuids32_slice
-                .iter()
-                .map(|uuid32| uuid_from_u32(uuid32.value))
-                .collect()
+            if value.uuids32.is_null() {
+                log::warn!("HostAdvertisementFields: num_uuids32={} but uuids32 is null", value.num_uuids32);
+                alloc::vec::Vec::new()
+            } else {
+                let uuids32_slice = unsafe {
+                    core::slice::from_raw_parts::<bindings::ble_uuid32_t>(
+                        value.uuids32,
+                        value.num_uuids32 as usize,
+                    )
+                };
+                uuids32_slice
+                    .iter()
+                    .map(|uuid32| uuid_from_u32(uuid32.value))
+                    .collect()
+            }
         } else {
             alloc::vec::Vec::new()
         };
 
         let uuids128 = if value.num_uuids128 > 0 {
-            let uuids128_slice = unsafe {
-                core::slice::from_raw_parts::<bindings::ble_uuid128_t>(
-                    value.uuids128,
-                    value.num_uuids128 as usize,
-                )
-            };
-
-            uuids128_slice
-                .iter()
-                .map(|uuid128| Uuid::from_bytes(uuid128.value))
-                .collect()
+            if value.uuids128.is_null() {
+                log::warn!("HostAdvertisementFields: num_uuids128={} but uuids128 is null", value.num_uuids128);
+                alloc::vec::Vec::new()
+            } else {
+                let uuids128_slice = unsafe {
+                    core::slice::from_raw_parts::<bindings::ble_uuid128_t>(
+                        value.uuids128,
+                        value.num_uuids128 as usize,
+                    )
+                };
+                uuids128_slice
+                    .iter()
+                    .map(|uuid128| Uuid::from_bytes(uuid128.value))
+                    .collect()
+            }
         } else {
             alloc::vec::Vec::new()
         };
 
         let name = if value.name_len > 0 {
-            let device_name_slice =
-                unsafe { core::slice::from_raw_parts::<u8>(value.name, value.name_len as usize) };
-            if let Ok(device_name_c_string) = CString::new(device_name_slice) {
-                Some(device_name_c_string.to_string_lossy().to_string())
-            } else {
+            if value.name.is_null() {
+                log::warn!("HostAdvertisementFields: name_len={} but name is null", value.name_len);
                 None
+            } else {
+                let device_name_slice = unsafe {
+                    core::slice::from_raw_parts::<u8>(value.name, value.name_len as usize)
+                };
+                if let Ok(device_name_c_string) = CString::new(device_name_slice) {
+                    Some(device_name_c_string.to_string_lossy().to_string())
+                } else {
+                    None
+                }
             }
         } else {
             None
         };
 
         let manufacturer_data = if value.mfg_data_len > 0 {
-            let mfg_data_slice = unsafe {
-                core::slice::from_raw_parts::<u8>(value.mfg_data, value.mfg_data_len as usize)
-            };
-            mfg_data_slice.to_vec()
+            if value.mfg_data.is_null() {
+                log::warn!("HostAdvertisementFields: mfg_data_len={} but mfg_data is null", value.mfg_data_len);
+                alloc::vec::Vec::new()
+            } else {
+                let mfg_data_slice = unsafe {
+                    core::slice::from_raw_parts::<u8>(value.mfg_data, value.mfg_data_len as usize)
+                };
+                mfg_data_slice.to_vec()
+            }
         } else {
             alloc::vec::Vec::new()
         };

@@ -59,6 +59,9 @@ pub fn ble_hs_mbuf_from_flat(data: &[u8]) -> NimbleResult<*mut bindings::os_mbuf
 
 /// Copies an mbuf chain into a flat `Vec<u8>`.
 pub fn ble_hs_mbuf_to_flat(om: *const bindings::os_mbuf) -> NimbleResult<alloc::vec::Vec<u8>> {
+    if om.is_null() {
+        return Err(NimbleError::InvalidArgument);
+    }
     let (ret, buffer) = unsafe {
         // os_mbuf_len traverses the full chain; om_len covers only the first segment.
         let buffer_length = bindings::os_mbuf_len(om);
