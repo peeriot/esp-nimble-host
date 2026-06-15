@@ -2,9 +2,14 @@
 # ║  NimBLE Host Configuration                                                 ║
 # ║                                                                            ║
 # ║  This file controls the compile-time configuration of the NimBLE BLE       ║
-# ║  host stack. Place a copy of this file in your firmware crate root and     ║
-# ║  customise as needed. esp-nimble-host's build.rs reads it and injects      ║
-# ║  the values as C #defines and Rust constants.                              ║
+# ║  host stack. esp-nimble-host's build.rs reads it and injects the values    ║
+# ║  as C #defines before compiling NimBLE.                                    ║
+# ║                                                                            ║
+# ║  To use a custom config in an external project, place a copy of this file  ║
+# ║  at your Cargo workspace root (the directory containing the top-level      ║
+# ║  Cargo.toml). build.rs finds it automatically via CARGO_WORKSPACE_DIR.     ║
+# ║  Alternatively, set NIMBLE_CONFIG_DIR in your project's                    ║
+# ║  .cargo/config.toml to point to the directory containing this file.        ║
 # ║                                                                            ║
 # ║  Missing values fall back to the defaults shown here.                      ║
 # ║  Memory estimates assume ESP32-C6 with WiFi+BLE coex.                      ║
