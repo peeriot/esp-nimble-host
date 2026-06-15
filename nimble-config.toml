@@ -166,3 +166,30 @@ max_bonds = 3
 
 # Maximum number of persisted client characteristic configuration descriptors.
 max_cccds = 8
+
+
+# ── Security Manager ─────────────────────────────────────────────────────────
+#
+# Controls BLE pairing. Enabling legacy=true compiles in NimBLE's SM and
+# the TinyCrypt AES library needed for key derivation. sc=true additionally
+# pulls in P-256 ECC (TinyCrypt) — omit for now unless a specific peripheral
+# requires Secure Connections.
+#
+# IO capability is set at runtime (KeyboardOnly) — not a build-time knob.
+# bonding=false means keys are never persisted; no ble_store backend needed.
+
+[security]
+# Enable Legacy pairing (AES-based STK derivation).
+legacy = true
+
+# Enable Secure Connections (P-256 ECDH). Requires hardware RNG hook.
+sc = false
+
+# Require MITM protection — mandatory for passkey authentication.
+mitm = true
+
+# Persist bond keys across connections. Needs a flash-backed ble_store.
+bonding = false
+
+# Maximum concurrent SM pairing procedures.
+max_procs = 1
