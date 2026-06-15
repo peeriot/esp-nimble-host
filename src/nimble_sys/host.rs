@@ -48,21 +48,19 @@ pub fn ble_hs_id_copy_addr(id_addr_type: u8) -> NimbleResult<[u8; 6]> {
 }
 
 /// Parses advertisement fields from a discovery descriptor.
-///
-/// # Arguments
-///
-/// * `disc` - The discovery descriptor containing advertisement data.
-///
-/// # Returns
-///
-/// Returns a `HostAdvertismentFields` struct on success, or an error otherwise.
 pub fn ble_hs_adv_parse_fields(
     disc: &bindings::ble_gap_disc_desc,
 ) -> NimbleResult<HostAdvertismentFields> {
+    ble_hs_adv_parse_fields_slice(unsafe {
+        core::slice::from_raw_parts(disc.data, disc.length_data as usize)
+    })
+}
+
+/// Parses advertisement fields from a raw byte slice.
+pub fn ble_hs_adv_parse_fields_slice(data: &[u8]) -> NimbleResult<HostAdvertismentFields> {
     let mut fields: bindings::ble_hs_adv_fields = unsafe { core::mem::zeroed() };
     let ret =
-        unsafe { bindings::ble_hs_adv_parse_fields(&mut fields, disc.data, disc.length_data) };
-
+        unsafe { bindings::ble_hs_adv_parse_fields(&mut fields, data.as_ptr(), data.len() as u8) };
     return_code_to_result(ret as u32, fields.into())
 }
 

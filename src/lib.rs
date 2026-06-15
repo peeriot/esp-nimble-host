@@ -24,18 +24,17 @@ use crate::data::{BleGapDiscParams, RawAdvertisement};
 // Re-export public types
 pub use crate::data::Advertisement;
 use crate::error::{InternalError, ScanError, ScanResult};
-use crate::nimble_sys::bindings::{
-    BLE_HS_FOREVER, ble_transport_to_hs_acl_impl, ble_transport_to_hs_evt_impl,
-};
+use crate::nimble_sys::bindings::BLE_HS_FOREVER;
 use crate::nimble_sys::{
     bindings::{
         BLE_GAP_EVENT_DISC, BLE_GAP_EVENT_DISC_COMPLETE, BLE_GAP_EVENT_EXT_DISC, BLE_HS_EAGAIN,
         BLE_HS_EINVAL, BLE_HS_IO_KEYBOARD_ONLY, MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE,
-        ble_gap_disc_desc, ble_gap_event, ble_hci_cmd, ble_hs_cfg, ble_transport_free, os_mbuf,
-        os_mbuf_append, os_mbuf_free_chain, os_msys_get_pkthdr,
+        ble_gap_disc_desc, ble_gap_event, ble_hci_cmd, os_mbuf,
     },
-    ble_gap_disc, ble_gap_disc_cancel, ble_hs_adv_parse_fields, ble_hs_id_copy_addr,
-    ble_hs_id_infer_auto, nimble_port_init, nimble_port_run, transport_alloc_evt,
+    ble_gap_disc, ble_gap_disc_cancel, ble_hs_adv_parse_fields, ble_hs_cfg, ble_hs_id_copy_addr,
+    ble_hs_id_infer_auto, ble_transport_alloc_evt, ble_transport_free, ble_transport_to_hs_acl,
+    ble_transport_to_hs_evt, nimble_port_init, nimble_port_run, os_mbuf_append_slice,
+    os_mbuf_free_chain, os_msys_get_pkthdr,
 };
 
 use core::ffi::{c_int, c_void};
@@ -274,11 +273,10 @@ impl HostTransport {
 
     fn init(&self) {
         nimble_port_init();
-        unsafe {
-            ble_hs_cfg.sync_cb = Some(on_sync);
-            ble_hs_cfg.reset_cb = Some(on_reset);
-            ble_hs_cfg.sm_io_cap = BLE_HS_IO_KEYBOARD_ONLY as u8;
-        }
+        let cfg = ble_hs_cfg();
+        cfg.sync_cb = Some(on_sync);
+        cfg.reset_cb = Some(on_reset);
+        cfg.sm_io_cap = BLE_HS_IO_KEYBOARD_ONLY as u8;
     }
 }
 
@@ -340,33 +338,27 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
 
                 // Allocate an mbuf with pkthdr
                 let om = loop {
-                    let om = unsafe { os_msys_get_pkthdr(0, 0) };
-                    if om.is_null() {
-                        yield_now().await;
-                        continue;
+                    match os_msys_get_pkthdr(0, 0) {
+                        Some(om) => break om,
+                        None => yield_now().await,
                     }
-                    break om;
                 };
 
                 // Append HCI ACL header and payload
-                let rc = unsafe { os_mbuf_append(om, hdr.as_ptr().cast(), hdr.len() as u16) };
-                if rc != 0 {
-                    unsafe { os_mbuf_free_chain(om) };
+                if os_mbuf_append_slice(om, &hdr).is_err() {
+                    let _ = os_mbuf_free_chain(om);
                     panic!("os_mbuf_append hdr failed");
                 }
 
                 let payload = &packet_bytes[5..5 + data_len];
-                let rc =
-                    unsafe { os_mbuf_append(om, payload.as_ptr().cast(), payload.len() as u16) };
-                if rc != 0 {
-                    unsafe { os_mbuf_free_chain(om) };
+                if os_mbuf_append_slice(om, payload).is_err() {
+                    let _ = os_mbuf_free_chain(om);
                     panic!("os_mbuf_append payload failed");
                 }
 
                 // Deliver to host
-                let rc = unsafe { ble_transport_to_hs_acl_impl(om) };
-                if rc != 0 {
-                    unsafe { os_mbuf_free_chain(om) };
+                if ble_transport_to_hs_acl(om).is_err() {
+                    let _ = os_mbuf_free_chain(om);
                     panic!("ble_transport_to_hs_acl_impl failed");
                 }
             }
@@ -385,27 +377,14 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
 
                 // Try to allocate memory for the event
                 let hci_ev = loop {
-                    match transport_alloc_evt() {
+                    match ble_transport_alloc_evt() {
                         Some(ev) => break ev,
                         None => yield_now().await,
                     }
                 };
 
-                unsafe {
-                    (*hci_ev).opcode = packet_bytes[1];
-                    (*hci_ev).length = payload_len as u8;
-                    (*hci_ev)
-                        .data
-                        .as_mut_slice(payload_len)
-                        .copy_from_slice(&packet_bytes[PAYLOAD_OFFSET..]);
-                }
-
-                unsafe {
-                    if ble_transport_to_hs_evt_impl(hci_ev as *mut c_void) != 0 {
-                        ble_transport_free(hci_ev as *mut _);
-                        panic!("Failed to send event to Host");
-                    }
-                }
+                ble_transport_to_hs_evt(hci_ev, packet_bytes[1], &packet_bytes[PAYLOAD_OFFSET..])
+                    .expect("Failed to send event to Host");
             }
             PacketType::Invalid => {
                 todo!("Packet type not handled yet: {:02x}", packet_bytes[0])
@@ -454,7 +433,7 @@ pub unsafe extern "C" fn ble_transport_to_ll_cmd_impl(buf: *mut c_void) -> c_int
     cmd_packet.push(u8::try_from(pkt_len).unwrap());
     cmd_packet.extend_from_slice(params);
 
-    unsafe { ble_transport_free(buf) };
+    ble_transport_free(buf);
 
     match HOST_2_CONTROLLER_QUEUE.try_send(cmd_packet) {
         Ok(()) => 0,
@@ -484,7 +463,7 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
 
         // Must include at least the HCI ACL header (4 bytes).
         if total_len < 4 {
-            os_mbuf_free_chain(om);
+            let _ = os_mbuf_free_chain(om);
             return BLE_HS_EINVAL as _;
         }
 
@@ -506,7 +485,7 @@ pub unsafe extern "C" fn ble_transport_to_ll_acl_impl(om: *mut os_mbuf) -> c_int
         }
 
         // Free the chain now that we've copied it out
-        os_mbuf_free_chain(om);
+        let _ = os_mbuf_free_chain(om);
 
         // Send to controller transport
         match HOST_2_CONTROLLER_QUEUE.try_send(packet) {
