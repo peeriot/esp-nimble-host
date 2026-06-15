@@ -28,12 +28,6 @@ impl Debug for BleAddr {
 }
 
 impl BleAddr {
-    /// Creates a new BLE address from type and address bytes.
-    ///
-    /// # Arguments
-    ///
-    /// * `type_` - Address type (public, random, etc.).
-    /// * `addr` - 6-byte MAC address.
     pub fn new(type_: u8, addr: [u8; 6]) -> Self {
         Self { type_, addr }
     }
@@ -41,21 +35,8 @@ impl BleAddr {
     /// Parses a BLE address from a string (e.g. `"01:23:45:67:89:ab"`) while
     /// explicitly specifying the BLE address type.
     ///
-    /// The input string is expected to be in the usual big-endian, colon-separated
-    /// form. Internally, the returned [`BleAddr`] stores the address in the same
-    /// little-endian byte order used by NimBLE/HCI (`val[0]` is the least
-    /// significant byte), so it can be forwarded directly to `ble_addr_t`.
-    ///
-    /// # Arguments
-    ///
-    /// * `type_` - The BLE address type (e.g. public vs random). This value is
-    ///   forwarded as-is to NimBLE (`ble_addr_t.type_`).
-    /// * `addr` - String representation of the MAC address in the form
-    ///   `"01:23:45:67:89:ab"`.
-    ///
-    /// # Returns
-    ///
-    /// Returns a [`BleAddr`] on success.
+    /// Input is big-endian colon-separated; the returned [`BleAddr`] stores it in
+    /// little-endian byte order (as `ble_addr_t`). `type_` is forwarded as-is to NimBLE.
     ///
     /// # Errors
     ///
@@ -91,10 +72,6 @@ impl BleAddr {
     }
 
     /// Returns the BLE address as a little-endian u64 (lower 6 bytes used).
-    ///
-    /// # Returns
-    ///
-    /// The address as a `u64`.
     pub fn as_u64(&self) -> u64 {
         let mut bytes = [0; 8];
         bytes[..6].copy_from_slice(&self.addr);
@@ -128,71 +105,73 @@ impl core::fmt::Display for BleAddr {
     }
 }
 
-/// BLE GAP discovery parameters wrapper.
-#[derive(Clone)]
-pub struct BleGapDiscParams(bindings::ble_gap_disc_params);
+/// BLE GAP discovery parameters.
+///
+/// Defaults to passive scanning at 50 ms window / 160 ms interval (~31% duty cycle),
+/// which leaves radio time for WiFi coexistence. Interval and window units are 0.625 ms.
+#[derive(Clone, Debug)]
+pub struct BleGapDiscParams {
+    pub filter_policy: u8,
+    /// Scan interval in units of 0.625 ms.
+    pub itvl: u16,
+    /// Scan window in units of 0.625 ms. Must be ≤ `itvl`.
+    pub window: u16,
+    pub limited: bool,
+    pub passive: bool,
+    pub filter_duplicates: bool,
+}
 
-impl BleGapDiscParams {
-    /// Creates new discovery parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter_policy` - Filter policy.
-    /// * `itvl` - Scan interval.
-    /// * `window` - Scan window.
-    /// * `limited` - Limited discovery mode.
-    /// * `passive` - Passive scanning.
-    /// * `filter_duplicates` - Filter duplicate advertisements.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `BleGapDiscParams`.
-    pub fn new(
-        filter_policy: u8,
-        itvl: u16,
-        window: u16,
-        limited: bool,
-        passive: bool,
-        filter_duplicates: bool,
-    ) -> Self {
-        Self(bindings::ble_gap_disc_params {
-            filter_policy,
-            window,
-            itvl,
-            _bitfield_align_1: [],
-            _bitfield_1: bindings::ble_gap_disc_params::new_bitfield_1(
-                limited as _,
-                passive as _,
-                filter_duplicates as _,
-            ),
-        })
-    }
-
-    /// Gets a reference to the inner C struct.
-    ///
-    /// # Returns
-    ///
-    /// Reference to the inner `ble_gap_disc_params`.
-    pub fn inner(&self) -> &bindings::ble_gap_disc_params {
-        &self.0
+impl Default for BleGapDiscParams {
+    fn default() -> Self {
+        Self {
+            filter_policy: 0,
+            itvl: 256,
+            window: 80,
+            limited: false,
+            passive: true,
+            filter_duplicates: false,
+        }
     }
 }
 
-impl From<bindings::ble_gap_disc_params> for BleGapDiscParams {
-    fn from(value: bindings::ble_gap_disc_params) -> Self {
-        Self(value)
+impl From<&BleGapDiscParams> for bindings::ble_gap_disc_params {
+    fn from(val: &BleGapDiscParams) -> Self {
+        bindings::ble_gap_disc_params {
+            filter_policy: val.filter_policy,
+            window: val.window,
+            itvl: val.itvl,
+            _bitfield_align_1: [],
+            _bitfield_1: bindings::ble_gap_disc_params::new_bitfield_1(
+                val.limited as _,
+                val.passive as _,
+                val.filter_duplicates as _,
+            ),
+        }
     }
 }
 
 impl From<BleGapDiscParams> for bindings::ble_gap_disc_params {
     fn from(val: BleGapDiscParams) -> Self {
-        val.0
+        Self::from(&val)
+    }
+}
+
+impl From<bindings::ble_gap_disc_params> for BleGapDiscParams {
+    fn from(value: bindings::ble_gap_disc_params) -> Self {
+        Self {
+            filter_policy: value.filter_policy,
+            itvl: value.itvl,
+            window: value.window,
+            limited: value.limited() != 0,
+            passive: value.passive() != 0,
+            filter_duplicates: value.filter_duplicates() != 0,
+        }
     }
 }
 
 /// Host advertisement fields parsed from BLE advertisement data.
 #[derive(Debug, Clone)]
-pub struct HostAdvertismentFields {
+pub struct HostAdvertisementFields {
     flags: u8,
     uuids16: alloc::vec::Vec<Uuid>,
     uuids32: alloc::vec::Vec<Uuid>,
@@ -201,63 +180,33 @@ pub struct HostAdvertismentFields {
     manufacturer_data: alloc::vec::Vec<u8>,
 }
 
-impl HostAdvertismentFields {
-    /// Gets the advertisement flags.
-    ///
-    /// # Returns
-    ///
-    /// The flags byte.
+impl HostAdvertisementFields {
     pub fn flags(&self) -> u8 {
         self.flags
     }
 
-    /// Gets the advertised device name, if present.
-    ///
-    /// # Returns
-    ///
-    /// An optional reference to the device name.
     pub fn name(&self) -> Option<&alloc::string::String> {
         self.name.as_ref()
     }
 
-    /// Gets the manufacturer-specific data.
-    ///
-    /// # Returns
-    ///
-    /// A byte slice of manufacturer data.
     pub fn manufacturer_data(&self) -> &[u8] {
         self.manufacturer_data.as_ref()
     }
 
-    /// Gets the advertised 16-bit UUIDs.
-    ///
-    /// # Returns
-    ///
-    /// A slice of 16-bit UUIDs.
     pub fn uuids16(&self) -> &[Uuid] {
         self.uuids16.as_ref()
     }
 
-    /// Gets the advertised 32-bit UUIDs.
-    ///
-    /// # Returns
-    ///
-    /// A slice of 32-bit UUIDs.
     pub fn uuids32(&self) -> &[Uuid] {
         self.uuids32.as_ref()
     }
 
-    /// Gets the advertised 128-bit UUIDs.
-    ///
-    /// # Returns
-    ///
-    /// A slice of 128-bit UUIDs.
     pub fn uuids128(&self) -> &[Uuid] {
         self.uuids128.as_ref()
     }
 }
 
-impl From<bindings::ble_hs_adv_fields> for HostAdvertismentFields {
+impl From<bindings::ble_hs_adv_fields> for HostAdvertisementFields {
     fn from(value: bindings::ble_hs_adv_fields) -> Self {
         let uuids16 = if value.num_uuids16 > 0 {
             let uuids16_slice = unsafe {
@@ -370,48 +319,22 @@ impl RawAdvertisement {
 pub struct Advertisement {
     addr: BleAddr,
     rssi: i8,
-    fields: HostAdvertismentFields,
+    fields: HostAdvertisementFields,
 }
 
 impl Advertisement {
-    /// Creates a new Advertisement.
-    ///
-    /// # Arguments
-    ///
-    /// * `addr` - BLE address of the advertiser.
-    /// * `rssi` - Received Signal Strength Indicator.
-    /// * `fields` - Parsed advertisement fields.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `Advertisement`.
-    pub fn new(addr: BleAddr, rssi: i8, fields: HostAdvertismentFields) -> Self {
+    pub fn new(addr: BleAddr, rssi: i8, fields: HostAdvertisementFields) -> Self {
         Self { addr, rssi, fields }
     }
 
-    /// Gets the BLE address of the advertiser.
-    ///
-    /// # Returns
-    ///
-    /// Reference to the `BleAddr`.
     pub fn addr(&self) -> &BleAddr {
         &self.addr
     }
 
-    /// Gets the parsed advertisement fields.
-    ///
-    /// # Returns
-    ///
-    /// Reference to the `HostAdvertismentFields`.
-    pub fn fields(&self) -> &HostAdvertismentFields {
+    pub fn fields(&self) -> &HostAdvertisementFields {
         &self.fields
     }
 
-    /// Gets the RSSI value.
-    ///
-    /// # Returns
-    ///
-    /// The RSSI as `i8`.
     pub fn rssi(&self) -> i8 {
         self.rssi
     }
@@ -435,28 +358,12 @@ const BLUETOOTH_BASE_UUID: u128 = 0x00000000_0000_1000_8000_00805f9b34fb;
 const BLUETOOTH_BASE_MASK: u128 = 0x00000000_ffff_ffff_ffff_ffffffffffff;
 const BLUETOOTH_BASE_MASK_16: u128 = 0xffff0000_ffff_ffff_ffff_ffffffffffff;
 
-/// Converts a 32-bit BLE short UUID to a full 128-bit UUID by filling in the standard Bluetooth Base UUID.
-///
-/// # Arguments
-///
-/// * `short` - The 32-bit short UUID.
-///
-/// # Returns
-///
-/// Returns a full 128-bit `Uuid`.
+/// Converts a 32-bit BLE short UUID to a full 128-bit UUID using the Bluetooth Base UUID.
 pub const fn uuid_from_u32(short: u32) -> Uuid {
     Uuid::from_u128(BLUETOOTH_BASE_UUID | ((short as u128) << 96))
 }
 
-/// Converts a 16-bit BLE short UUID to a full 128-bit UUID by filling in the standard Bluetooth Base UUID.
-///
-/// # Arguments
-///
-/// * `short` - The 16-bit short UUID.
-///
-/// # Returns
-///
-/// Returns a full 128-bit `Uuid`.
+/// Converts a 16-bit BLE short UUID to a full 128-bit UUID using the Bluetooth Base UUID.
 pub const fn uuid_from_u16(short: u16) -> Uuid {
     uuid_from_u32(short as u32)
 }
@@ -469,11 +376,6 @@ pub enum NimbleUuid {
 }
 
 impl NimbleUuid {
-    /// Gets a pointer to the underlying C UUID struct.
-    ///
-    /// # Returns
-    ///
-    /// Pointer to the `ble_uuid_t`.
     pub fn raw_ptr(&self) -> *const bindings::ble_uuid_t {
         match self {
             NimbleUuid::Uuid16(uuid) => &uuid.u,
@@ -483,15 +385,7 @@ impl NimbleUuid {
     }
 }
 
-/// Converts a Rust Uuid to a NimbleUuid (16, 32, or 128 bit).
-///
-/// # Arguments
-///
-/// * `uuid` - The Rust `Uuid` to convert.
-///
-/// # Returns
-///
-/// Returns a `NimbleUuid` variant matching the UUID width.
+/// Converts a Rust [`Uuid`] to a [`NimbleUuid`] (16, 32, or 128 bit), choosing the narrowest fit.
 pub fn uuid_to_nimble_uuid(uuid: &Uuid) -> NimbleUuid {
     let value = uuid.as_u128();
 
@@ -519,15 +413,7 @@ pub fn uuid_to_nimble_uuid(uuid: &Uuid) -> NimbleUuid {
     }
 }
 
-/// Converts a Nimble C UUID struct to a Rust Uuid.
-///
-/// # Arguments
-///
-/// * `uuid` - Pointer to a Nimble `ble_uuid_any_t`.
-///
-/// # Returns
-///
-/// Returns a Rust `Uuid` if conversion is successful, otherwise an error.
+/// Converts a NimBLE C UUID to a Rust [`Uuid`].
 pub fn nimble_uuid_to_uuid(
     uuid: &bindings::ble_uuid_any_t,
 ) -> core::result::Result<Uuid, DataError> {

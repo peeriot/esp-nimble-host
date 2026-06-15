@@ -81,7 +81,6 @@ pub type ReadOperationContext = Option<Bytes>;
 
 /// Reads a BLE attribute.
 pub async fn read_attribute(conn_handle: ConnectionHandle, handle: u16) -> GattResult<Bytes> {
-    // If your helper is generic over RawMutex, pass it here explicitly (e.g. <ReadOperationContext, M>).
     let (operation, operation_handle) =
         peripheral_operation::<ReadOperationContext, CriticalSectionRawMutex>(conn_handle, None);
 

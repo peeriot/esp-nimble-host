@@ -1,32 +1,14 @@
-// use core::ffi::CString;
-
 use crate::data::*;
 
 use super::{NimbleResult, bindings, return_code_to_result};
 
 /// Cancels an ongoing BLE GAP discovery process.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_disc_cancel() -> NimbleResult {
     let ret = unsafe { bindings::ble_gap_disc_cancel() };
     return_code_to_result(ret as u32, ())
 }
 
 /// Starts a BLE GAP discovery process.
-///
-/// # Arguments
-///
-/// * `own_addr_type` - The address type of the local device.
-/// * `duration_ms` - Duration of the discovery in milliseconds.
-/// * `disc_params` - Parameters for the discovery process.
-/// * `cb` - Callback function to handle events.
-/// * `cb_arg` - Argument to pass to the callback function.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_disc(
     own_addr_type: u8,
     duration_ms: u32,
@@ -34,32 +16,13 @@ pub fn ble_gap_disc(
     cb: bindings::ble_gap_event_fn,
     cb_arg: *mut core::ffi::c_void,
 ) -> NimbleResult {
-    let ret = unsafe {
-        bindings::ble_gap_disc(
-            own_addr_type,
-            duration_ms as _,
-            disc_params.inner(),
-            cb,
-            cb_arg,
-        )
-    };
+    let raw_params = bindings::ble_gap_disc_params::from(disc_params);
+    let ret =
+        unsafe { bindings::ble_gap_disc(own_addr_type, duration_ms as _, &raw_params, cb, cb_arg) };
     return_code_to_result(ret as u32, ())
 }
 
 /// Initiates a BLE GAP connection to a peer device.
-///
-/// # Arguments
-///
-/// * `own_addr_type` - The address type of the local device.
-/// * `peer_addr` - The address of the peer device.
-/// * `duration_ms` - Duration of the connection attempt in milliseconds.
-/// * `params` - Optional connection parameters.
-/// * `cb` - Callback function to handle events.
-/// * `cb_arg` - Argument to pass to the callback function.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_connect(
     own_addr_type: u8,
     peer_addr: &bindings::ble_addr_t,
@@ -85,50 +48,23 @@ pub fn ble_gap_connect(
 }
 
 /// Terminates an active BLE GAP connection.
-///
-/// # Arguments
-///
-/// * `conn_handle` - The connection handle to terminate.
-/// * `hci_reason` - The HCI reason code for termination.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_terminate(conn_handle: ConnectionHandle, hci_reason: u8) -> NimbleResult {
     let ret = unsafe { bindings::ble_gap_terminate(conn_handle, hci_reason) };
     return_code_to_result(ret as u32, ())
 }
 
 /// Cancels an ongoing BLE GAP connection attempt.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_conn_cancel() -> NimbleResult {
     let ret = unsafe { bindings::ble_gap_conn_cancel() };
     return_code_to_result(ret as u32, ())
 }
 
-/// Checks if a BLE GAP connection attempt is currently ongoing.
-///
-/// # Returns
-///
-/// Returns `true` if a connection is active, otherwise `false`.
+/// Returns `true` if a GAP connection attempt is currently in progress.
 pub fn ble_gap_conn_active() -> bool {
     unsafe { bindings::ble_gap_conn_active() != 0 }
 }
 
-/// Sets a callback for GAP events on a specific connection.
-///
-/// # Arguments
-///
-/// * `conn_handle` - The connection handle.
-/// * `cb` - Callback function to handle events.
-/// * `cb_arg` - Argument to pass to the callback function.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
+/// Sets the GAP event callback for a specific connection.
 pub fn ble_gap_set_event_cb(
     conn_handle: ConnectionHandle,
     cb: bindings::ble_gap_event_fn,
@@ -138,29 +74,12 @@ pub fn ble_gap_set_event_cb(
     return_code_to_result(ret as u32, ())
 }
 
-/// Checks if BLE advertising is currently active.
-///
-/// # Returns
-///
-/// Returns `true` if advertising is active, otherwise `false`.
+/// Returns `true` if BLE advertising is currently active.
 pub fn ble_gap_adv_active() -> bool {
-    unsafe { bindings::ble_gap_adv_active() == 1 }
+    unsafe { bindings::ble_gap_adv_active() != 0 }
 }
 
 /// Starts BLE advertising with the given parameters.
-///
-/// # Arguments
-///
-/// * `own_addr_type` - The address type of the local device.
-/// * `direct_addr` - Optional direct address for directed advertising.
-/// * `duration_ms` - Duration of advertising in milliseconds.
-/// * `adv_params` - Advertising parameters.
-/// * `cb` - Callback function to handle events.
-/// * `cb_arg` - Argument to pass to the callback function.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_adv_start(
     own_addr_type: u8,
     direct_addr: Option<&bindings::ble_addr_t>,
@@ -185,38 +104,18 @@ pub fn ble_gap_adv_start(
 }
 
 /// Stops ongoing BLE advertising.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
 pub fn ble_gap_adv_stop() -> NimbleResult {
     let ret = unsafe { bindings::ble_gap_adv_stop() };
     return_code_to_result(ret as u32, ())
 }
 
-/// Sets the raw advertising data for BLE advertising.
-///
-/// # Arguments
-///
-/// * `data` - The advertising data as a byte slice.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
+/// Sets the raw advertising data payload.
 pub fn ble_gap_adv_set_data(data: &[u8]) -> NimbleResult {
     let ret = unsafe { bindings::ble_gap_adv_set_data(data.as_ptr(), data.len() as i32) };
     return_code_to_result(ret as u32, ())
 }
 
-/// Sets the advertising fields for BLE advertising.
-///
-/// # Arguments
-///
-/// * `rsp_fields` - The advertising fields to set.
-///
-/// # Returns
-///
-/// Returns a `NimbleResult` indicating success or failure.
+/// Sets the structured advertising fields.
 pub fn ble_gap_adv_set_fields(rsp_fields: &bindings::ble_hs_adv_fields) -> NimbleResult {
     let ret = unsafe { bindings::ble_gap_adv_set_fields(rsp_fields) };
     return_code_to_result(ret as u32, ())

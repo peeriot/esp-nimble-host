@@ -10,30 +10,14 @@ pub fn ble_hs_cfg() -> &'static mut bindings::ble_hs_cfg {
     }
 }
 
-/// Infers the best address type to use for the device, optionally using privacy.
-///
-/// # Arguments
-///
-/// * `privacy` - If true, privacy is enabled when inferring the address type.
-///
-/// # Returns
-///
-/// Returns the inferred address type as `u8` on success, or an error otherwise.
+/// Infers the best own address type, optionally enabling privacy.
 pub fn ble_hs_id_infer_auto(privacy: bool) -> NimbleResult<u8> {
     let mut addr_type = 0u8;
     let ret = unsafe { bindings::ble_hs_id_infer_auto(privacy as i32, &mut addr_type) };
     return_code_to_result(ret as u32, addr_type)
 }
 
-/// Copies the BLE device address for the given address type.
-///
-/// # Arguments
-///
-/// * `id_addr_type` - The address type to copy.
-///
-/// # Returns
-///
-/// Returns the BLE address as a `[u8; 6]` array on success, or an error otherwise.
+/// Returns the device BLE address for the given address type.
 pub fn ble_hs_id_copy_addr(id_addr_type: u8) -> NimbleResult<[u8; 6]> {
     let mut addr = [0; 6];
 
@@ -46,29 +30,21 @@ pub fn ble_hs_id_copy_addr(id_addr_type: u8) -> NimbleResult<[u8; 6]> {
 /// Parses advertisement fields from a discovery descriptor.
 pub fn ble_hs_adv_parse_fields(
     disc: &bindings::ble_gap_disc_desc,
-) -> NimbleResult<HostAdvertismentFields> {
+) -> NimbleResult<HostAdvertisementFields> {
     ble_hs_adv_parse_fields_slice(unsafe {
         core::slice::from_raw_parts(disc.data, disc.length_data as usize)
     })
 }
 
 /// Parses advertisement fields from a raw byte slice.
-pub fn ble_hs_adv_parse_fields_slice(data: &[u8]) -> NimbleResult<HostAdvertismentFields> {
+pub fn ble_hs_adv_parse_fields_slice(data: &[u8]) -> NimbleResult<HostAdvertisementFields> {
     let mut fields: bindings::ble_hs_adv_fields = unsafe { core::mem::zeroed() };
     let ret =
         unsafe { bindings::ble_hs_adv_parse_fields(&mut fields, data.as_ptr(), data.len() as u8) };
     return_code_to_result(ret as u32, fields.into())
 }
 
-/// Creates an mbuf from a flat data slice for BLE operations.
-///
-/// # Arguments
-///
-/// * `data` - The data slice to convert into an mbuf.
-///
-/// # Returns
-///
-/// Returns a pointer to the created `os_mbuf` on success, or an error otherwise.
+/// Allocates an mbuf and copies `data` into it.
 pub fn ble_hs_mbuf_from_flat(data: &[u8]) -> NimbleResult<*mut bindings::os_mbuf> {
     let data_len = data.len();
     let data = data.as_ptr();
@@ -81,15 +57,7 @@ pub fn ble_hs_mbuf_from_flat(data: &[u8]) -> NimbleResult<*mut bindings::os_mbuf
     Ok(ptr)
 }
 
-/// Converts an mbuf to a flat byte vector.
-///
-/// # Arguments
-///
-/// * `om` - Pointer to the `os_mbuf` to convert.
-///
-/// # Returns
-///
-/// Returns a `Vec<u8>` containing the mbuf data on success, or an error otherwise.
+/// Copies an mbuf chain into a flat `Vec<u8>`.
 pub fn ble_hs_mbuf_to_flat(om: *const bindings::os_mbuf) -> NimbleResult<alloc::vec::Vec<u8>> {
     let (ret, buffer) = unsafe {
         let om_ref = &*om;

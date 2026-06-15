@@ -1,3 +1,34 @@
+//! Async `no_std` BLE host for ESP32, built on the [NimBLE](https://github.com/apache/mynewt-nimble) stack.
+//!
+//! Wraps NimBLE's C API in safe async Rust for [Embassy](https://embassy.dev/) on ESP32 targets.
+//!
+//! # Initialisation
+//!
+//! Three long-running tasks must be running before any BLE API is used:
+//!
+//! - A task calling [`transport_task_rx`] — reads HCI frames from the controller.
+//! - A task calling [`transport_task_tx`] — writes HCI commands/ACL to the controller.
+//! - A task calling [`host_task`] — runs the NimBLE event loop (must not yield to the
+//!   async executor; use `esp_hal::task::spawn_task` or equivalent).
+//!
+//! After the tasks are running, call [`wait_for_sync`] before using any scanner or
+//! connection API.
+//!
+//! # Key types
+//!
+//! | Type | Purpose |
+//! |------|---------|
+//! | [`HostTransport`] | Initialises NimBLE and owns the HCI transport. |
+//! | [`Scanner`] | BLE advertisement scanner. Subscribe with [`Scanner::subscribe`] to receive [`RawAdvertisement`]s; convert with [`TryFrom`] to get parsed [`Advertisement`] fields. |
+//! | [`peripheral::Peripheral`] | Handle to a remote BLE peripheral — connect, discover, read/write attributes, subscribe to notifications. |
+//!
+//! # Feature flags
+//!
+//! | Flag | Default | Description |
+//! |------|---------|-------------|
+//! | `esp32c6` | ✓ | Target ESP32-C6 |
+//! | `esp32c3` | — | Target ESP32-C3 |
+
 #![no_std]
 #![feature(c_size_t)]
 
@@ -132,9 +163,7 @@ impl<M: RawMutex + 'static> Scanner<M> {
         Self {
             inner,
             scanning: false,
-            // Default: passive scanning, 50 ms window every 160 ms (~31% duty cycle).
-            // Leaves radio time for WiFi coexistence. Units are 0.625 ms.
-            params: BleGapDiscParams::new(0, 256, 80, false, true, false),
+            params: BleGapDiscParams::default(),
         }
     }
 
