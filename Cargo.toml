@@ -6,8 +6,6 @@ authors = ["Peeriot GmbH <info@peeriot.io>"]
 publish = false
 
 [features]
-default = ["esp32c6"]
-esp32c3 = ["esp-radio/esp32c3"]
 esp32c6 = ["esp-radio/esp32c6"]
 
 [dependencies]
