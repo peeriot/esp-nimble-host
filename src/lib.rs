@@ -21,14 +21,6 @@
 //! | [`HostTransport`] | Initialises NimBLE and owns the HCI transport. |
 //! | [`Scanner`] | BLE advertisement scanner. Subscribe with [`Scanner::subscribe`] to receive [`RawAdvertisement`]s; convert with [`TryFrom`] to get parsed [`Advertisement`] fields. |
 //! | [`peripheral::Peripheral`] | Handle to a remote BLE peripheral — connect, discover, read/write attributes, subscribe to notifications. |
-//!
-//! # Feature flags
-//!
-//! | Flag | Default | Description |
-//! |------|---------|-------------|
-//! | `esp32c6` | ✓ | Target ESP32-C6 |
-//! | `esp32c3` | — | Target ESP32-C3 |
-
 #![no_std]
 #![feature(c_size_t)]
 
