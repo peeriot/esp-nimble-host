@@ -11,12 +11,12 @@ esp32c6 = ["esp-radio/esp32c6"]
 esp32c61 = ["esp-radio/esp32c61"]
 
 [dependencies]
-esp-radio = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = [
+esp-radio = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "new", features = [
   "ble-host-npl",
   "log-04",
   "unstable",
 ] }
-esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = [
+esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "new", features = [
   "unstable",
 ] }
 embassy-sync = "0.7.2"
