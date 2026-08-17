@@ -157,6 +157,47 @@ fn patch_ble_hs_event_deinit_before_pool_put(nimble_dir: &Path) {
     fs::write(&file, patched).expect("Failed to write patched ble_hs.c");
 }
 
+/// Patch NimBLE's `ble_gattc_disc_all_chrs_rx_complete` off-by-one that drops
+/// the last characteristic of a service.
+///
+/// # Why this is needed
+///
+/// The completion check is meant to stop discovery once fewer than 2 handles
+/// remain after the last-seen value handle, since a characteristic needs at
+/// least a declaration and a value handle. It instead compares against
+/// `end_handle - 1`, one handle short of the intended boundary, so it stops
+/// one continuation round before the request that would cover the service's
+/// final characteristic. If that characteristic sits in the last two handles
+/// of the service (no descriptor/padding after it), it's silently dropped
+/// from discovery — with no error, since NimBLE reports the procedure as
+/// cleanly finished (`BLE_HS_EDONE`).
+///
+/// See <https://github.com/apache/mynewt-nimble/commit/1d866e4>, which
+/// introduced this in the process of skipping an unneeded round trip; still
+/// present as of `nimble_1_9_0_tag` and current `master`.
+fn patch_ble_gattc_disc_all_chrs_last_char(nimble_dir: &Path) {
+    let file = nimble_dir.join("nimble/host/src/ble_gattc.c");
+    let src = fs::read_to_string(&file).expect("Failed to read ble_gattc.c");
+
+    let needle = "    if (proc->disc_all_chrs.prev_handle + 1 >= proc->disc_all_chrs.end_handle - 1) {";
+
+    let replacement = "    /* [esp-nimble-host patch] Off-by-one: compare against end_handle, not\n     * end_handle - 1, or the service's last characteristic is dropped when\n     * it occupies the final two handles. See build.rs for details. */\n    if (proc->disc_all_chrs.prev_handle + 1 >= proc->disc_all_chrs.end_handle) {";
+
+    if !src.contains(needle) {
+        if src.contains("[esp-nimble-host patch] Off-by-one") {
+            // Already patched in a previous build.
+            return;
+        }
+        panic!(
+            "Could not find the expected code pattern in ble_gattc.c to apply \
+             the disc-all-chrs off-by-one patch. The NimBLE version may have changed."
+        );
+    }
+
+    let patched = src.replace(needle, replacement);
+    fs::write(&file, patched).expect("Failed to write patched ble_gattc.c");
+}
+
 // ── nimble-config.toml schema ─────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
@@ -606,6 +647,9 @@ fn main() {
 
     // Patch ble_hs.c to free Event structs before returning blocks to pool.
     patch_ble_hs_event_deinit_before_pool_put(&nimble_dir);
+
+    // Patch ble_gattc.c off-by-one that drops a service's last characteristic.
+    patch_ble_gattc_disc_all_chrs_last_char(&nimble_dir);
 
     // Local stub/override headers shipped with this crate.
     let stubs_dir = manifest_dir.join("nimble");
