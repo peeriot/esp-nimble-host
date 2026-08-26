@@ -19,7 +19,7 @@ esp-radio = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "featur
 esp-hal = { git = "ssh://git@github.com/peeriot/esp-hal.git", branch = "feature/ble-host-npl-upstream", features = [
   "unstable",
 ] }
-embassy-sync = "0.7.2"
+embassy-sync = "0.8"
 embassy-futures = "0.1.2"
 log = "0.4.29"
 tinyrlibc = { version = "0.5.1", default-features = false, features = [
