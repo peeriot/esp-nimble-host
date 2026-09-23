@@ -205,11 +205,21 @@ transport buffer counts and sizes, the msys mbuf pool, GATT MTU and procedure li
 security manager. `build.rs` turns it into `MYNEWT_VAL_*` C defines that override NimBLE's `syscfg.h` defaults.
 
 The file is extensively commented, including RAM and flash cost estimates per option - read it before changing sizing.
-Defaults target a central + observer workload with security disabled.
+Defaults target a central + observer workload with up to 4 connections and legacy pairing with MITM protection.
 
-To use your own configuration from a consuming project, either place `nimble-config.toml` at your Cargo workspace root
-(found automatically via `CARGO_WORKSPACE_DIR`) or set `NIMBLE_CONFIG_DIR` in your `.cargo/config.toml`. Missing values
-fall back to built-in defaults.
+To change the configuration from a consuming project, create a `nimble-config.toml` holding only the values you want
+to change and point `NIMBLE_CONFIG_DIR` at its directory in the project's `.cargo/config.toml`:
+
+```toml
+[env]
+NIMBLE_CONFIG_DIR = { value = ".", relative = true }
+```
+
+The project file is merged over the bundled one key by key, so everything it leaves out keeps its bundled value.
+Unknown sections or keys fail the build. The BLE controller keeps its own connection limit (2 by default in 
+`esp-radio`): create it with `BleConnector::new(bt, esp_nimble_host::controller_config())` so it follows 
+`connections.max_connections`. `CARGO_WORKSPACE_DIR` is also searched, but cargo never sets it: it only applies when the
+project defines it in its own `[env]` table.
 
 Changing this file changes what gets compiled: enabling `security.legacy` or `security.sc` additionally pulls in
 `ext/tinycrypt`, and disabling roles compiles that code out entirely.

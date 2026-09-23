@@ -201,7 +201,7 @@ fn patch_ble_gattc_disc_all_chrs_last_char(nimble_dir: &Path) {
 // ── nimble-config.toml schema ─────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct NimbleConfig {
     roles: RolesConfig,
     connections: ConnectionsConfig,
@@ -214,7 +214,7 @@ struct NimbleConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct RolesConfig {
     central: bool,
     observer: bool,
@@ -234,19 +234,19 @@ impl Default for RolesConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct ConnectionsConfig {
     max_connections: u16,
 }
 
 impl Default for ConnectionsConfig {
     fn default() -> Self {
-        Self { max_connections: 1 }
+        Self { max_connections: 4 }
     }
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct TransportConfig {
     acl_count: u16,
     acl_size: u16,
@@ -268,7 +268,7 @@ impl Default for TransportConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct MsysConfig {
     block_count: u16,
     block_size: u16,
@@ -284,7 +284,7 @@ impl Default for MsysConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct GattConfig {
     preferred_mtu: u16,
     max_procs: u16,
@@ -304,7 +304,7 @@ impl Default for GattConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct L2capConfig {
     max_channels: u16,
     max_sig_procs: u16,
@@ -320,7 +320,7 @@ impl Default for L2capConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct StorageConfig {
     max_bonds: u16,
     max_cccds: u16,
@@ -336,7 +336,7 @@ impl Default for StorageConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct SecurityConfig {
     legacy: bool,
     sc: bool,
@@ -348,59 +348,90 @@ struct SecurityConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            legacy: false,
+            legacy: true,
             sc: false,
-            mitm: false,
+            mitm: true,
             bonding: false,
             max_procs: 1,
         }
     }
 }
 
-/// Load nimble-config.toml from the consuming project, or fall back to defaults.
-///
-/// Search order:
-///   1. `NIMBLE_CONFIG_DIR` env var — set this in `.cargo/config.toml` of the
-///      consuming crate for full control over the path (e.g. in a deep workspace).
-///   2. Workspace root (`CARGO_WORKSPACE_DIR`) — works automatically when the
-///      consuming crate places `nimble-config.toml` at its workspace root.
-///   3. `CARGO_MANIFEST_DIR` — this crate's own root; used when building the
-///      library directly (e.g. `cargo clippy` in the repo) where
-///      `CARGO_WORKSPACE_DIR` may not be set.
-///   4. Built-in defaults — when none of the above yields a file.
+/// Load the NimBLE configuration from three layers, each overriding the one
+/// before it key by key:
+///   1. The built-in defaults (the `Default` impls above), for any key neither
+///      file sets.
+///   2. This crate's own `nimble-config.toml`, read from `CARGO_MANIFEST_DIR`.
+///   3. The consuming project's `nimble-config.toml`, if any, so it only needs
+///      the values it changes. It is taken from the first of these directories
+///      that contains one:
+///        - `NIMBLE_CONFIG_DIR` - set this in the consuming project's
+///          `.cargo/config.toml` `[env]` table.
+///        - `CARGO_WORKSPACE_DIR` - cargo does not set this itself; it applies
+///          only when the consuming project defines it in its own `[env]` table.
 fn load_config() -> NimbleConfig {
-    // Tell cargo to re-run if the override var changes.
     println!("cargo:rerun-if-env-changed=NIMBLE_CONFIG_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_WORKSPACE_DIR");
 
-    let search_paths: Vec<PathBuf> = [
-        std::env::var("NIMBLE_CONFIG_DIR").ok().map(PathBuf::from),
-        std::env::var("CARGO_WORKSPACE_DIR").ok().map(PathBuf::from),
-        // CARGO_MANIFEST_DIR points to this crate's root — useful when building
-        // the library directly (e.g. `cargo clippy` in the repo) where
-        // CARGO_WORKSPACE_DIR may not be set.
-        std::env::var("CARGO_MANIFEST_DIR").ok().map(PathBuf::from),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let bundled_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("nimble-config.toml");
+    println!("cargo:rerun-if-changed={}", bundled_path.display());
+    let mut config = read_config_table(&bundled_path);
 
-    for dir in &search_paths {
-        let config_path = dir.join("nimble-config.toml");
-        if config_path.exists() {
-            println!("cargo:rerun-if-changed={}", config_path.display());
+    let override_path = ["NIMBLE_CONFIG_DIR", "CARGO_WORKSPACE_DIR"]
+        .into_iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .map(|dir| PathBuf::from(dir).join("nimble-config.toml"))
+        .find(|path| path.exists());
+
+    match override_path {
+        Some(path) => {
+            println!("cargo:rerun-if-changed={}", path.display());
             println!(
-                "cargo:warning=Using NimBLE config from: {}",
-                config_path.display()
+                "cargo:warning=Using NimBLE config from: {} (over the bundled defaults)",
+                path.display()
             );
-            let content = fs::read_to_string(&config_path)
-                .unwrap_or_else(|e| panic!("Failed to read {}: {e}", config_path.display()));
-            return toml::from_str(&content)
-                .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", config_path.display()));
+            merge_tables(&mut config, read_config_table(&path));
         }
+        None => println!("cargo:warning=Using the bundled NimBLE config"),
     }
 
-    println!("cargo:warning=No nimble-config.toml found, using built-in defaults");
-    NimbleConfig::default()
+    let config: NimbleConfig = config
+        .try_into()
+        .unwrap_or_else(|e| panic!("Invalid NimBLE configuration: {e}"));
+
+    // The controller is configured with the same limit (see `controller_config`
+    // in lib.rs) and rejects values outside this range at start-up.
+    let max_connections = config.connections.max_connections;
+    assert!(
+        (1..=70).contains(&max_connections),
+        "Invalid NimBLE configuration: connections.max_connections must be 1-70, got {max_connections}"
+    );
+
+    config
+}
+
+/// Parse a `nimble-config.toml` into an untyped table, so layers can be merged
+/// key by key before deserializing.
+fn read_config_table(path: &Path) -> toml::Table {
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+
+    toml::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
+}
+
+/// Overlay `overlay` onto `base`: nested tables merge recursively, any other
+/// value in `overlay` replaces the one in `base`.
+fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(base_table)), toml::Value::Table(overlay_table)) => {
+                merge_tables(base_table, overlay_table);
+            }
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
 }
 
 /// Generate a C header that overrides NimBLE's syscfg defaults.

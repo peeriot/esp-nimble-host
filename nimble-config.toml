@@ -5,14 +5,15 @@
 # ║  host stack. esp-nimble-host's build.rs reads it and injects the values    ║
 # ║  as C #defines before compiling NimBLE.                                    ║
 # ║                                                                            ║
-# ║  To use a custom config in an external project, place a copy of this file  ║
-# ║  at your Cargo workspace root (the directory containing the top-level      ║
-# ║  Cargo.toml). build.rs finds it automatically via CARGO_WORKSPACE_DIR.     ║
-# ║  Alternatively, set NIMBLE_CONFIG_DIR in your project's                    ║
-# ║  .cargo/config.toml to point to the directory containing this file.        ║
+# ║  These are the defaults. To change them from a consuming project, create   ║
+# ║  a nimble-config.toml holding only the values you want to change and set   ║
+# ║  NIMBLE_CONFIG_DIR in the project's .cargo/config.toml:                    ║
 # ║                                                                            ║
-# ║  Missing values fall back to the defaults shown here.                      ║
-# ║  Memory estimates assume ESP32-C6 with WiFi+BLE coex.                      ║
+# ║      [env]                                                                 ║
+# ║      NIMBLE_CONFIG_DIR = { value = ".", relative = true }                  ║
+# ║                                                                            ║
+# ║  The project file is merged over this one key by key; unknown keys are     ║
+# ║  rejected. Memory estimates assume ESP32-C6 with WiFi+BLE coex.            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
@@ -45,18 +46,23 @@ broadcaster = false
 
 # ── Connections ──────────────────────────────────────────────────────────────
 #
-# Each connection costs ~4-6 KB of heap at runtime (ACL buffers, L2CAP state,
-# connection handle structures). The L2CAP channel count auto-scales at
-# 3 channels per connection (signal + ATT + SM).
+# The BLE controller is configured with the same limit when it is created with
+# esp_nimble_host::controller_config(), so this is the only setting to change.
+# Per-connection cost, measured on an ESP32-C5 with WiFi running:
+#   - Controller: reserves ~1.1 KB of heap for each of the first 2 connections
+#     at start-up, plus ~40 B per max_connections slot. Connections beyond the
+#     first 2 are allocated from the heap only when they are established, and
+#     fail then if memory is short.
+#   - Host: ~0.2 KB of static RAM (connection state + L2CAP channels, which
+#     auto-scale at 3 per connection: signal + ATT + SM).
 #
 # If you need to connect to multiple BLE sensors simultaneously, increase
 # max_connections. The transport buffer counts (below) should be scaled
 # accordingly.
 
 [connections]
-# Maximum number of simultaneous BLE connections.
-# Memory impact: ~4-6 KB per connection + L2CAP channels.
-max_connections = 1
+# Maximum number of simultaneous BLE connections. Range: 1-70.
+max_connections = 4
 
 
 # ── Transport Buffers ────────────────────────────────────────────────────────
