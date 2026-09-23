@@ -51,8 +51,8 @@ use crate::nimble_sys::bindings::BLE_HS_FOREVER;
 use crate::nimble_sys::{
     bindings::{
         BLE_GAP_EVENT_DISC, BLE_GAP_EVENT_DISC_COMPLETE, BLE_GAP_EVENT_EXT_DISC, BLE_HS_EAGAIN,
-        BLE_HS_EINVAL, BLE_HS_IO_KEYBOARD_ONLY, MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE,
-        ble_gap_disc_desc, ble_gap_event, ble_hci_cmd, os_mbuf,
+        BLE_HS_EINVAL, BLE_HS_IO_KEYBOARD_ONLY, MYNEWT_VAL_BLE_MAX_CONNECTIONS,
+        MYNEWT_VAL_BLE_TRANSPORT_EVT_SIZE, ble_gap_disc_desc, ble_gap_event, ble_hci_cmd, os_mbuf,
     },
     ble_gap_disc, ble_gap_disc_cancel, ble_hs_adv_parse_fields, ble_hs_cfg, ble_hs_id_copy_addr,
     ble_hs_id_infer_auto, ble_transport_alloc_evt, ble_transport_free, ble_transport_to_hs_acl,
@@ -291,6 +291,21 @@ enum PacketType {
     Invalid = 0xff,
     Acl = H4_ACL,
     Event = H4_EVT,
+}
+
+/// Maximum number of simultaneous BLE connections the host is built for, set by
+/// `connections.max_connections` in `nimble-config.toml`.
+pub const MAX_CONNECTIONS: u16 = MYNEWT_VAL_BLE_MAX_CONNECTIONS as u16;
+
+/// Controller configuration matching this host's `nimble-config.toml`.
+///
+/// The controller keeps its own connection limit. Pass this to [`BleConnector::new`] so the
+/// controller accepts [`MAX_CONNECTIONS`]; chain further controller settings onto it as needed.
+pub fn controller_config() -> esp_radio::ble::Config {
+    // ESP-IDF default strategy is to match the controller max connection to the host max
+    // connections. So here we do the same so that we have 1 knob to control the maximum connections
+    // in the entire stack.
+    esp_radio::ble::Config::default().with_max_connections(MAX_CONNECTIONS)
 }
 
 pub struct HostTransport {
