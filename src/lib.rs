@@ -11,6 +11,9 @@
 //! - A task calling [`host_task`] — runs the NimBLE event loop (must not yield to the
 //!   async executor; use `esp_hal::task::spawn_task` or equivalent).
 //!
+//! The controller behind [`HostTransport`] must be created with [`controller_config`], so it
+//! accepts as many connections as the host is built for ([`MAX_CONNECTIONS`]).
+//!
 //! After the tasks are running, call [`wait_for_sync`] before using any scanner or
 //! connection API.
 //!
@@ -302,7 +305,7 @@ pub const MAX_CONNECTIONS: u16 = MYNEWT_VAL_BLE_MAX_CONNECTIONS as u16;
 /// The controller keeps its own connection limit. Pass this to [`BleConnector::new`] so the
 /// controller accepts [`MAX_CONNECTIONS`]; chain further controller settings onto it as needed.
 pub fn controller_config() -> esp_radio::ble::Config {
-    // ESP-IDF default strategy is to match the controller max connection to the host max
+    // ESP-IDF default strategy is to match the controller max connections to the host max
     // connections. So here we do the same so that we have 1 knob to control the maximum connections
     // in the entire stack.
     esp_radio::ble::Config::default().with_max_connections(MAX_CONNECTIONS)
@@ -313,6 +316,12 @@ pub struct HostTransport {
 }
 
 impl HostTransport {
+    /// Initialise NimBLE over `controller_connector`.
+    ///
+    /// Create the connector with [`controller_config`]:
+    /// `BleConnector::new(bt, esp_nimble_host::controller_config())`. The controller keeps its
+    /// own connection limit (2 by default in `esp-radio`), and connections beyond it fail
+    /// even though the host accepts [`MAX_CONNECTIONS`].
     pub fn new(controller_connector: BleConnector<'static>) -> Self {
         let new_host = Self {
             controller: controller_connector,
@@ -334,7 +343,7 @@ impl HostTransport {
 pub async fn transport_task_tx() {
     loop {
         let h2c_bytes = HOST_2_CONTROLLER_QUEUE.receive().await;
-        log::trace!("[H2C] Forward {:02x?}", &h2c_bytes);
+        log::trace!("[H2C] Forward {:02x?}", h2c_bytes);
         esp_radio::ble::npl::send_hci(&h2c_bytes);
         log::trace!("[H2C] Forward done");
     }
@@ -358,7 +367,7 @@ pub async fn transport_task_rx(mut ble_host: HostTransport) {
 
         let packet_bytes = &buf[..read];
 
-        log::trace!("[C2H] Incoming packet {:02x?}", &packet_bytes);
+        log::trace!("[C2H] Incoming packet {:02x?}", packet_bytes);
 
         let packet_type = PacketType::from(packet_bytes[0]);
 

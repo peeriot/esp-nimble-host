@@ -271,7 +271,11 @@ impl<M: RawMutex + 'static> Peripheral<M> {
         self.inner.conn_handle().is_some()
     }
 
-    /// Initiate Legacy passkey pairing on an established connection.
+    /// Initiate passkey pairing on an established connection.
+    ///
+    /// The pairing method follows `nimble-config.toml`: with `security.sc` on,
+    /// NimBLE uses Secure Connections passkey entry when the peer supports it,
+    /// and falls back to Legacy pairing (if `security.legacy` is on) otherwise.
     ///
     /// Stores `passkey`, resets the pair signal, calls
     /// `ble_gap_security_initiate`, then awaits `BLE_GAP_EVENT_ENC_CHANGE`

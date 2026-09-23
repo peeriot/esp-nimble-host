@@ -13,7 +13,7 @@
 # ║      NIMBLE_CONFIG_DIR = { value = ".", relative = true }                  ║
 # ║                                                                            ║
 # ║  The project file is merged over this one key by key; unknown keys are     ║
-# ║  rejected. Memory estimates assume ESP32-C6 with WiFi+BLE coex.            ║
+# ║  rejected. Memory estimates assume WiFi+BLE coex.                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
@@ -193,7 +193,8 @@ max_cccds = 8
 # Enable Legacy pairing (AES-based STK derivation).
 legacy = true
 
-# Enable Secure Connections (P-256 ECDH). Requires hardware RNG hook.
+# Enable Secure Connections (P-256 ECDH). NimBLE supplies ECC with random
+# numbers from the controller (HCI LE Rand); no platform RNG hook is needed.
 sc = false
 
 # Require MITM protection — mandatory for passkey authentication.

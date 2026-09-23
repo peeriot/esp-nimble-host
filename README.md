@@ -90,7 +90,8 @@ Working today, exercised on hardware:
   MTU exchange.
 - **GATT client** - service / characteristic / descriptor discovery (all, or by service UUID), attribute read and write
   (with and without response, long writes handled against the negotiated MTU), notification and indication stream.
-- **Pairing** - Legacy passkey pairing (`BLE_SM_IOACT_INPUT` / `DISP`). Disabled in the default configuration.
+- **Pairing** - Legacy passkey pairing (`BLE_SM_IOACT_INPUT` / `DISP`). Enabled in the default configuration, with MITM
+  protection.
 
 Not implemented:
 
@@ -114,13 +115,13 @@ There are no unit or integration tests in this crate; verification happens in co
 - **`clang`** on the build host, with RISC-V target support. NimBLE is cross-compiled with `clang`, not with GCC.
 - **Network access on the first build.** `build.rs` downloads the NimBLE `nimble_1_9_0_tag` tarball into `OUT_DIR`. It
   is cached afterwards, but `cargo clean` forces a re-download.
-- **SSH access to `github.com/peeriot/esp-hal`.** `esp-hal` and `esp-radio` are pulled from a private fork (branch
+- **Access to `github.com/peeriot/esp-hal`.** `esp-hal` and `esp-radio` are pulled over HTTPS from a fork (branch
   `feature/ble-host-npl-upstream`) that carries the `ble-host-npl` NPL implementation. This is the piece that makes
   NimBLE run on `esp-rtos`; upstream `esp-radio` does not provide it.
 
 ```toml
 [dependencies]
-esp-nimble-host = { git = "ssh://git@github.com/peeriot/esp-nimble-host.git", features = ["esp32c6"] }
+esp-nimble-host = { git = "https://github.com/peeriot/esp-nimble-host.git", features = ["esp32c6"] }
 ```
 
 Building the library on its own:
@@ -163,7 +164,8 @@ extern "C" fn ble_transport_thread(_: *mut c_void) {
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         let bluetooth = unsafe { BT::steal() };
-        let connector = BleConnector::new(bluetooth, Default::default()).unwrap();
+        // controller_config() sets the controller's connection limit to the host's.
+        let connector = BleConnector::new(bluetooth, esp_nimble_host::controller_config()).unwrap();
         let transport = HostTransport::new(connector); // initialises NimBLE
         spawner.spawn(ble_transport_tx()).unwrap();    // -> transport_task_tx()
         spawner.spawn(ble_transport_rx(transport)).unwrap(); // -> transport_task_rx(t)
@@ -228,10 +230,11 @@ With both `security.legacy` and `security.sc` off, the security manager is compi
 
 ## Modifications to NimBLE
 
-NimBLE is downloaded at build time rather than vendored, and `build.rs` applies two source patches before compiling.
-Both are memory-lifecycle fixes required to run NimBLE against the `esp-radio` NPL; neither changes protocol behaviour.
-Both are applied by string match and **deliberately panic if the expected pattern is missing**, so a NimBLE version bump
+NimBLE is downloaded at build time rather than vendored, and `build.rs` applies three source patches before compiling.
+All are applied by string match and **deliberately panic if the expected pattern is missing**, so a NimBLE version bump
 fails loudly instead of silently dropping a fix.
+
+Two are memory-lifecycle fixes required to run NimBLE against the `esp-radio` NPL and do not change protocol behaviour:
 
 - **`porting/nimble/src/os_mempool.c`** - zero each memory-pool block on allocation. NimBLE threads its free-list
   pointer through the first bytes of a freed block; the NPL stores a heap `Event` pointer in `ble_npl_event.dummy`, and
@@ -242,8 +245,14 @@ fails loudly instead of silently dropping a fix.
   `ble_hs_hci_ev_pool`, otherwise the heap `Event` leaks on every recycle. As of NimBLE 1.9 this is the only such call
   site.
 
-The second patch modifies the host, not the porting layer. It is small and non-behavioural, but if you pursue
-qualification, treat both patches as material to disclose. See the doc comments in `build.rs` for the full rationale.
+One changes what the host does on the air:
+
+- **`nimble/host/src/ble_gattc.c`** - fix an off-by-one in the end-of-discovery check of Discover All Characteristics,
+  which drops a service's last characteristic when it occupies the service's final two handles. The host now sends one
+  more Read By Type request in that case, as the procedure requires.
+
+Two of the three patches modify the host, not the porting layer. If you pursue qualification, treat all of them as
+material to disclose. See the doc comments in `build.rs` for the full rationale.
 
 ## Repository layout
 
