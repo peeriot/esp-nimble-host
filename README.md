@@ -222,7 +222,9 @@ Unknown sections or keys fail the build. The BLE controller keeps its own connec
 contains a `nimble-config.toml`, otherwise the build fails.
 
 Changing this file changes what gets compiled: enabling `security.legacy` or `security.sc` additionally pulls in
-`ext/tinycrypt`, and disabling roles compiles that code out entirely.
+`ext/tinycrypt` (`security.sc` also its P-256 ECDH and AES-CMAC), and disabling roles compiles that code out entirely.
+With both `security.legacy` and `security.sc` off, the security manager is compiled out and
+`Peripheral::pair_with_passkey` fails at runtime.
 
 ## Modifications to NimBLE
 

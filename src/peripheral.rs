@@ -277,6 +277,10 @@ impl<M: RawMutex + 'static> Peripheral<M> {
     /// `ble_gap_security_initiate`, then awaits `BLE_GAP_EVENT_ENC_CHANGE`
     /// (or a disconnect). The passkey is injected automatically when
     /// `BLE_GAP_EVENT_PASSKEY_ACTION` fires in the GAP callback.
+    ///
+    /// With both `security.legacy` and `security.sc` off in
+    /// `nimble-config.toml` the security manager is compiled out, and this
+    /// fails with [`PairError::InitiateFailed`].
     pub async fn pair_with_passkey(&self, passkey: u32) -> PairResult {
         let Some(conn_handle) = self.inner.conn_handle() else {
             return Err(PairError::NotConnected);

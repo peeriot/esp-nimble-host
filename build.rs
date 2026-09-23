@@ -610,6 +610,14 @@ fn main() {
 
     // Load nimble-config.toml and generate C override header.
     let config = load_config();
+
+    // NimBLE compiles its security manager in when either pairing method is on
+    // (`NIMBLE_BLE_SM` in nimble_opt_auto.h); the Rust side follows it.
+    let security_manager = config.security.legacy || config.security.sc;
+    println!("cargo::rustc-check-cfg=cfg(nimble_sm)");
+    if security_manager {
+        println!("cargo::rustc-cfg=nimble_sm");
+    }
     let override_header = generate_syscfg_override(&config, &out_dir);
 
     // Download NimBLE source (cached in OUT_DIR between incremental builds).
@@ -641,7 +649,7 @@ fn main() {
         nimble_dir.join("nimble/transport/include"),
     ];
 
-    if config.security.legacy || config.security.sc {
+    if security_manager {
         include_dirs.push(nimble_dir.join("ext/tinycrypt/include"));
     }
 
@@ -705,10 +713,20 @@ fn main() {
         .file(nimble_dir.join("nimble/transport/src/transport.c"))
         .includes(&include_dirs);
 
-    if config.security.legacy || config.security.sc {
+    if security_manager {
         cc_build
             .file(nimble_dir.join("ext/tinycrypt/src/aes_encrypt.c"))
             .file(nimble_dir.join("ext/tinycrypt/src/utils.c"));
+    }
+
+    if config.security.sc {
+        // AES-CMAC and P-256 ECDH for Secure Connections. NimBLE installs its
+        // own RNG with `uECC_set_rng`, so the platform RNG in
+        // ecc_platform_specific.c is not needed.
+        cc_build
+            .file(nimble_dir.join("ext/tinycrypt/src/cmac_mode.c"))
+            .file(nimble_dir.join("ext/tinycrypt/src/ecc.c"))
+            .file(nimble_dir.join("ext/tinycrypt/src/ecc_dh.c"));
     }
 
     // Cross-compile for bare-metal RISC-V
