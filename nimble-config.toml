@@ -56,9 +56,8 @@ broadcaster = false
 #   - Host: ~0.2 KB of static RAM (connection state + L2CAP channels, which
 #     auto-scale at 3 per connection: signal + ATT + SM).
 #
-# If you need to connect to multiple BLE sensors simultaneously, increase
-# max_connections. The transport buffer counts (below) should be scaled
-# accordingly.
+# When changing max_connections, scale msys.block_count (below) with it: all
+# ACL data, in both directions, is carried in msys blocks.
 
 [connections]
 # Maximum number of simultaneous BLE connections. Range: 1-70.
@@ -70,20 +69,17 @@ max_connections = 4
 # These control the HCI transport buffer pool between the BLE host and
 # controller. This is the most impactful memory tuning section.
 #
-# ACL buffers carry data packets (GATT reads/writes, notifications).
 # Event buffers carry HCI events (connection complete, advertising reports).
+# ACL data (GATT reads/writes, notifications) does not use the transport ACL
+# pool in this port: esp-nimble-host receives it into msys blocks, and the
+# host sends it from msys blocks. Size [msys] for ACL traffic instead.
 #
-# Rule of thumb:
-#   - For 1 connection:  acl_count = 4-6,  evt_discardable_count = 4-8
-#   - For 3 connections: acl_count = 8-12, evt_discardable_count = 8-16
-#
-# If you see "r_os_mbuf_append returned 2" panics, increase acl_count or
-# msys_block_count.
+# If you see "r_os_mbuf_append returned 2" panics, increase msys.block_count.
 
 [transport]
-# Number of ACL data buffers (host ↔ controller). Each buffer is acl_size bytes.
-# Fewer = less memory, but may stall during heavy GATT traffic.
-# Memory impact: acl_count × acl_size ≈ 6 × 251 = ~1.5 KB
+# Number of buffers in NimBLE's transport ACL pool (controller → host). The
+# pool is allocated statically but unused by this port (see above), so raising
+# this only costs RAM. Memory impact: acl_count × acl_size ≈ 6 × 251 = ~1.5 KB
 acl_count = 6
 
 # Size of each ACL buffer in bytes. 251 is the BLE 4.2 default (max single
@@ -96,7 +92,8 @@ acl_size = 251
 evt_count = 4
 
 # Number of discardable event buffers (for advertisement reports during scanning).
-# Reduce if you don't scan, or scan with filter_duplicates enabled.
+# Independent of max_connections. Reduce if you don't scan, or scan with
+# filter_duplicates enabled.
 # Memory impact: evt_discardable_count × evt_size ≈ 8 × 70 = ~560 B
 evt_discardable_count = 8
 
@@ -115,9 +112,12 @@ evt_size = 70
 
 [msys]
 # Number of blocks in the primary msys pool.
-# More blocks = can handle more concurrent BLE operations.
-# Memory impact: block_count × block_size ≈ 8 × 292 = ~2.3 KB
-block_count = 8
+# More blocks = can handle more concurrent BLE operations. Every received ACL
+# packet holds a block until the host has processed it, and every outgoing
+# ATT request holds one until sent. The default of 12 leaves ~3 blocks per
+# connection at max_connections = 4; not yet measured under load on 4 links.
+# Memory impact: block_count × block_size ≈ 12 × 292 = ~3.5 KB
+block_count = 12
 
 # Size of each msys block in bytes. 292 fits a maximum-size ACL packet
 # (251 bytes) plus L2CAP + HCI headers. Rarely needs changing.
@@ -204,3 +204,4 @@ bonding = false
 
 # Maximum concurrent SM pairing procedures.
 max_procs = 1
+
