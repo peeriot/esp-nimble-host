@@ -199,9 +199,13 @@ fn patch_ble_gattc_disc_all_chrs_last_char(nimble_dir: &Path) {
 }
 
 // ── nimble-config.toml schema ─────────────────────────────────────────────────
+//
+// There are no Rust-side defaults: the bundled `nimble-config.toml` is the
+// single source of them and must set every key, so a key missing from it is a
+// build error rather than a silently diverging default.
 
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NimbleConfig {
     roles: RolesConfig,
     connections: ConnectionsConfig,
@@ -214,7 +218,7 @@ struct NimbleConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct RolesConfig {
     central: bool,
     observer: bool,
@@ -222,31 +226,14 @@ struct RolesConfig {
     broadcaster: bool,
 }
 
-impl Default for RolesConfig {
-    fn default() -> Self {
-        Self {
-            central: true,
-            observer: true,
-            peripheral: false,
-            broadcaster: false,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct ConnectionsConfig {
     max_connections: u16,
 }
 
-impl Default for ConnectionsConfig {
-    fn default() -> Self {
-        Self { max_connections: 4 }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct TransportConfig {
     acl_count: u16,
     acl_size: u16,
@@ -255,36 +242,15 @@ struct TransportConfig {
     evt_size: u16,
 }
 
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self {
-            acl_count: 6,
-            acl_size: 251,
-            evt_count: 4,
-            evt_discardable_count: 8,
-            evt_size: 70,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct MsysConfig {
     block_count: u16,
     block_size: u16,
 }
 
-impl Default for MsysConfig {
-    fn default() -> Self {
-        Self {
-            block_count: 8,
-            block_size: 292,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct GattConfig {
     preferred_mtu: u16,
     max_procs: u16,
@@ -292,51 +258,22 @@ struct GattConfig {
     resume_rate_ms: u16,
 }
 
-impl Default for GattConfig {
-    fn default() -> Self {
-        Self {
-            preferred_mtu: 128,
-            max_procs: 4,
-            max_prep_entries: 0,
-            resume_rate_ms: 1000,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct L2capConfig {
     max_channels: u16,
     max_sig_procs: u16,
 }
 
-impl Default for L2capConfig {
-    fn default() -> Self {
-        Self {
-            max_channels: 0,
-            max_sig_procs: 1,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct StorageConfig {
     max_bonds: u16,
     max_cccds: u16,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            max_bonds: 3,
-            max_cccds: 8,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct SecurityConfig {
     legacy: bool,
     sc: bool,
@@ -345,62 +282,67 @@ struct SecurityConfig {
     max_procs: u16,
 }
 
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            legacy: true,
-            sc: false,
-            mitm: true,
-            bonding: false,
-            max_procs: 1,
-        }
-    }
-}
-
-/// Load the NimBLE configuration from three layers, each overriding the one
-/// before it key by key:
-///   1. The built-in defaults (the `Default` impls above), for any key neither
-///      file sets.
-///   2. This crate's own `nimble-config.toml`, read from `CARGO_MANIFEST_DIR`.
-///   3. The consuming project's `nimble-config.toml`, if any, so it only needs
-///      the values it changes. It is taken from the first of these directories
-///      that contains one:
-///        - `NIMBLE_CONFIG_DIR` - set this in the consuming project's
-///          `.cargo/config.toml` `[env]` table.
-///        - `CARGO_WORKSPACE_DIR` - cargo does not set this itself; it applies
-///          only when the consuming project defines it in its own `[env]` table.
+/// Load the NimBLE configuration from two layers:
+///   1. This crate's own `nimble-config.toml`, read from `CARGO_MANIFEST_DIR`.
+///      It holds the defaults and must set every key.
+///   2. The consuming project's `nimble-config.toml`, read from the directory
+///      named by `NIMBLE_CONFIG_DIR` (set in the project's `.cargo/config.toml`
+///      `[env]` table). It is merged over the first key by key, so it only
+///      needs the values it changes.
+///
+/// `NIMBLE_CONFIG_DIR` must be an absolute path to a directory containing a
+/// `nimble-config.toml`, otherwise the build fails. A relative path would be
+/// resolved against this crate's checkout rather than the consuming project,
+/// and a missing file would be ignored without notice: cargo only reruns this
+/// script for files that existed when it last ran. An empty value counts as
+/// unset.
 fn load_config() -> NimbleConfig {
     println!("cargo:rerun-if-env-changed=NIMBLE_CONFIG_DIR");
-    println!("cargo:rerun-if-env-changed=CARGO_WORKSPACE_DIR");
 
     let bundled_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("nimble-config.toml");
     println!("cargo:rerun-if-changed={}", bundled_path.display());
     let mut config = read_config_table(&bundled_path);
 
-    let override_path = ["NIMBLE_CONFIG_DIR", "CARGO_WORKSPACE_DIR"]
-        .into_iter()
-        .filter_map(|var| std::env::var(var).ok())
-        .map(|dir| PathBuf::from(dir).join("nimble-config.toml"))
-        .find(|path| path.exists());
-
-    match override_path {
-        Some(path) => {
+    let override_path = match std::env::var_os("NIMBLE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            assert!(
+                dir.is_absolute(),
+                "NIMBLE_CONFIG_DIR must be an absolute path, got `{}`. In .cargo/config.toml, \
+                 set it with `relative = true` to resolve it against the project",
+                dir.display()
+            );
+            let path = dir.join("nimble-config.toml");
+            assert!(
+                path.is_file(),
+                "NIMBLE_CONFIG_DIR is set, but {} does not exist. Create it with the \
+                 settings to change, or unset NIMBLE_CONFIG_DIR to use the bundled defaults",
+                path.display()
+            );
             println!("cargo:rerun-if-changed={}", path.display());
             println!(
                 "cargo:warning=Using NimBLE config from: {} (over the bundled defaults)",
                 path.display()
             );
             merge_tables(&mut config, read_config_table(&path));
+            Some(path)
         }
-        None => println!("cargo:warning=Using the bundled NimBLE config"),
-    }
+        None => {
+            println!("cargo:warning=Using the bundled NimBLE config");
+            None
+        }
+    };
 
+    // Errors name the project file when there is one, since it is almost
+    // always the one at fault.
+    let source = override_path.as_deref().unwrap_or(&bundled_path);
     let config: NimbleConfig = config
         .try_into()
-        .unwrap_or_else(|e| panic!("Invalid NimBLE configuration: {e}"));
+        .unwrap_or_else(|e| panic!("Invalid NimBLE configuration in {}: {e}", source.display()));
 
     // The controller is configured with the same limit (see `controller_config`
-    // in lib.rs) and rejects values outside this range at start-up.
+    // in lib.rs) and rejects values outside this range at start-up. 70 is the
+    // limit esp-radio enforces on every chip this crate supports (C5, C6, C61).
     let max_connections = config.connections.max_connections;
     assert!(
         (1..=70).contains(&max_connections),

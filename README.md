@@ -216,10 +216,10 @@ NIMBLE_CONFIG_DIR = { value = ".", relative = true }
 ```
 
 The project file is merged over the bundled one key by key, so everything it leaves out keeps its bundled value.
-Unknown sections or keys fail the build. The BLE controller keeps its own connection limit (2 by default in 
-`esp-radio`): create it with `BleConnector::new(bt, esp_nimble_host::controller_config())` so it follows 
-`connections.max_connections`. `CARGO_WORKSPACE_DIR` is also searched, but cargo never sets it: it only applies when the
-project defines it in its own `[env]` table.
+Unknown sections or keys fail the build. The BLE controller keeps its own connection limit (2 by default in
+`esp-radio`): create it with `BleConnector::new(bt, esp_nimble_host::controller_config())` so it follows
+`connections.max_connections`. `NIMBLE_CONFIG_DIR` must be an absolute path (hence `relative = true`) to a directory that
+contains a `nimble-config.toml`, otherwise the build fails.
 
 Changing this file changes what gets compiled: enabling `security.legacy` or `security.sc` additionally pulls in
 `ext/tinycrypt`, and disabling roles compiles that code out entirely.
