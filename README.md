@@ -8,9 +8,9 @@ qualification** for products written in Rust.
 
 ## Why this exists
 
-Rust's embedded ecosystem has no qualified BLE host. At the time of writing, [
-`trouble`](https://github.com/embassy-rs/trouble) is essentially the only pure-Rust BLE host - it is a good project, but
-its feature coverage is still incomplete and, more importantly for commercial work, it is neither qualified nor
+Rust's embedded ecosystem has no qualified BLE host. At the time of writing,
+[`trouble`](https://github.com/embassy-rs/trouble) is essentially the only pure-Rust BLE host - it is a good project,
+but its feature coverage is still incomplete and, more importantly for commercial work, it is neither qualified nor
 pre-qualified with the Bluetooth SIG. If you want to ship a Bluetooth product written in Rust and you need to satisfy a
 qualification process, you currently have no obvious route.
 
@@ -24,7 +24,7 @@ qualification track record and keeps the Rust contribution as thin and as clearl
 │  esp-nimble-host         ← this repo: safe async Rust   │
 │                            wrappers + build integration │
 ├─────────────────────────────────────────────────────────┤
-│  Apache NimBLE host (C, unmodified protocol logic)      │  ◀── host stack with an
+│  Apache NimBLE host (C, upstream + 3 disclosed patches) │  ◀── host stack with an
 │    GAP · GATT · ATT · L2CAP · SM                        │      established record in
 │                                                         │      qualified products
 ├─────────────────────────────────────────────────────────┤
@@ -44,11 +44,13 @@ The argument, in short:
 - The **controller** is Espressif's, used as-is through the `esp-hal` / `esp-radio` ecosystem. Espressif publishes
   qualified designs for its Bluetooth subsystems, so the controller is not something this project needs to re-qualify.
 - The **host** is Apache NimBLE, a stack widely used in products that have gone through Bluetooth qualification. Its
-  protocol logic is compiled from upstream sources and is not reimplemented here.
+  protocol logic is compiled from upstream sources plus three disclosed patches (see
+  [Modifications to NimBLE](#modifications-to-nimble)) and is not reimplemented here.
 - What this project actually adds is the **NPL glue and the Rust API surface**. NPL is a porting layer - timers,
-  mutexes, event queues, memory pools - not protocol behaviour. Because the qualifiable protocol logic sits above it
-  untouched, adapting NPL to `esp-rtos` should not, in principle, undermine an argument for reusing NimBLE's
-  qualification in this configuration.
+  mutexes, event queues, memory pools - not protocol behaviour. Because the qualifiable protocol logic sits above it,
+  modified only by the patches listed in [Modifications to NimBLE](#modifications-to-nimble), adapting NPL to
+  `esp-rtos` should not, in principle, undermine an argument for reusing NimBLE's qualification in this
+  configuration.
 
 That is the reasoning. It is a design intended to *keep qualification reachable*, not a claim that qualification has
 happened.
@@ -69,10 +71,10 @@ Specifically:
 - **It is on you to verify the component claims.** Which Espressif QDIDs apply to your exact chip, module, and blob
   version - and what NimBLE's qualification status is for the version you build - are facts you must confirm from the
   SIG's listings and from Espressif, not from this README.
-- **This build patches NimBLE C sources** (see [Modifications to NimBLE](#modifications-to-nimble)). One patch touches
-  the host proper, not just the porting layer. The changes are memory-lifecycle fixes rather than protocol changes, but
-  they are modifications to the stack and you should treat them as something to disclose and discuss if you pursue
-  qualification.
+- **This build patches NimBLE C sources** (see [Modifications to NimBLE](#modifications-to-nimble)). Two of the three
+  patches touch the host proper, not just the porting layer, and one of those changes what the host sends: one more
+  GATT request during characteristic discovery. They are modifications to the stack and you should treat them as
+  something to disclose and discuss if you pursue qualification.
 - **Trademark and membership obligations are yours.** Using Bluetooth technology and branding commercially carries
   Bluetooth SIG membership and licensing requirements independent of this code.
 
@@ -90,6 +92,7 @@ Working today, exercised on hardware:
   MTU exchange.
 - **GATT client** - service / characteristic / descriptor discovery (all, or by service UUID), attribute read and write
   (with and without response, long writes handled against the negotiated MTU), notification and indication stream.
+  A write without response that exceeds the MTU is sent as a long write, which is acknowledged.
 - **Pairing** - Legacy passkey pairing (`BLE_SM_IOACT_INPUT` / `DISP`). Enabled in the default configuration, with MITM
   protection.
 
@@ -114,7 +117,8 @@ There are no unit or integration tests in this crate; verification happens in co
 - **A RISC-V bare-metal target**, e.g. `riscv32imac-unknown-none-elf`.
 - **`clang`** on the build host, with RISC-V target support. NimBLE is cross-compiled with `clang`, not with GCC.
 - **Network access on the first build.** `build.rs` downloads the NimBLE `nimble_1_9_0_tag` tarball into `OUT_DIR`. It
-  is cached afterwards, but `cargo clean` forces a re-download.
+  is cached afterwards, but `cargo clean` forces a re-download. The source tree is re-extracted from the cached
+  tarball on every build-script run, so the patches always apply to pristine sources.
 - **Access to `github.com/peeriot/esp-hal`.** `esp-hal` and `esp-radio` are pulled over HTTPS from a fork (branch
   `feature/ble-host-npl-upstream`) that carries the `ble-host-npl` NPL implementation. This is the piece that makes
   NimBLE run on `esp-rtos`; upstream `esp-radio` does not provide it.
@@ -144,10 +148,13 @@ A working arrangement, as used in production:
 
 | Task                                                      | Priority | Kind                                                 |
 |-----------------------------------------------------------|----------|------------------------------------------------------|
-| HCI transport (`transport_task_rx` + `transport_task_tx`) | 40       | dedicated OS thread running its own Embassy executor |
+| HCI transport (`transport_task_rx` + `transport_task_tx`) | 31       | dedicated OS thread running its own Embassy executor |
 | NimBLE host (`host_task`)                                 | 30       | OS task                                              |
 | BLE controller                                            | 29       | OS task, spawned by `esp-radio`                      |
 | Application                                               | 1        | main Embassy executor                                |
+
+`esp-rtos` priorities range up to 31, and `task_create` silently clamps anything higher. The controller's default
+priority is the maximum minus 2.
 
 `host_task` runs `nimble_port_run()` and **must not be spawned as an Embassy task** - it does not yield to the async
 executor. Spawn it as an OS task.
@@ -156,7 +163,7 @@ executor. Spawn it as an OS task.
 // Sketch - see a consuming application for a complete, compiling setup.
 
 // 1. Start the RTOS.
-esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
 // 2. HCI transport on a dedicated high-priority thread with its own executor.
 extern "C" fn ble_transport_thread(_: *mut c_void) {
@@ -174,7 +181,7 @@ extern "C" fn ble_transport_thread(_: *mut c_void) {
 
 unsafe {
     esp_radio_rtos_driver::task_create(
-        "HCI transport", ble_transport_thread, core::ptr::null_mut(), 40, None, BLE_HCI_STACK,
+        "HCI transport", ble_transport_thread, core::ptr::null_mut(), 31, None, BLE_HCI_STACK,
     );
     // 3. The NimBLE host event loop as an OS task.
     esp_radio_rtos_driver::task_create(
@@ -185,16 +192,27 @@ unsafe {
 // 4. Wait for host/controller sync, then use the API.
 esp_nimble_host::wait_for_sync().await;
 
-let mut scanner = Scanner::new();
-let mut advs = scanner.subscribe() ?;
-scanner.start_scan(None) ?;
+// Annotate the types: the default mutex parameter is not used for inference.
+let mut scanner: Scanner = Scanner::new();
+scanner.start_scan(None)?;
 
-while let WaitResult::Message(raw) = advs.next_message().await {
-let peripheral = Peripheral::new(raw.addr().clone());
-peripheral.connect().await ?;
-peripheral.discover_all_services().await ?;
+// The subscriber borrows `scanner`, so drop it before stopping the scan.
+let addr = {
+    let mut advs = scanner.subscribe()?;
+    loop {
+        if let WaitResult::Message(raw) = advs.next_message().await {
+            break raw.addr().clone(); // pick the device you want here
+        }
+    }
+};
+
+// NimBLE rejects a connection attempt while scanning (BLE_HS_EBUSY).
+scanner.stop_scan()?;
+
+let peripheral: Peripheral = Peripheral::new(addr);
+peripheral.connect().await?;
+peripheral.discover_all_services().await?;
 // read / write / subscribe ...
-}
 ```
 
 To receive notifications, subscribe with `Peripheral::subscribe()` **and** enable them on the remote device by writing
@@ -231,8 +249,8 @@ With both `security.legacy` and `security.sc` off, the security manager is compi
 ## Modifications to NimBLE
 
 NimBLE is downloaded at build time rather than vendored, and `build.rs` applies three source patches before compiling.
-All are applied by string match and **deliberately panic if the expected pattern is missing**, so a NimBLE version bump
-fails loudly instead of silently dropping a fix.
+All are applied by string match to a freshly extracted tree and **deliberately panic unless the expected pattern
+occurs exactly once**, so a NimBLE version bump fails loudly instead of silently dropping a fix.
 
 Two are memory-lifecycle fixes required to run NimBLE against the `esp-radio` NPL and do not change protocol behaviour:
 
@@ -261,6 +279,7 @@ material to disclose. See the doc comments in `build.rs` for the full rationale.
 | `src/lib.rs`                                                  | Scanner, `HostTransport`, HCI transport tasks, host sync, C FFI callbacks          |
 | `src/peripheral.rs`                                           | `Peripheral` - connect, pair, GATT operations, GAP event dispatch                  |
 | `src/discovery.rs`, `src/characteristic.rs`, `src/service.rs` | GATT client discovery and attribute access                                         |
+| `src/peripheral_operation.rs`                                 | callback-to-async bridge for one-shot GATT procedures                              |
 | `src/data.rs`, `src/error.rs`                                 | addresses, advertisements, conversions, error taxonomy                             |
 | `src/nimble_sys/`                                             | the FFI boundary - safe wrappers over the generated bindings                       |
 | `src/libc.rs`                                                 | libc shims NimBLE links against (the rest come from `tinyrlibc`)                   |
