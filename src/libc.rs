@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_size_t};
+use core::ffi::c_char;
 
 /// # Safety
 /// Caller must ensure `dest` has enough capacity for `strlen(dest) + num + 1`
@@ -7,7 +7,7 @@ use core::ffi::{c_char, c_size_t};
 pub unsafe extern "C" fn strncat(
     dest: *mut c_char,
     src: *const c_char,
-    num: c_size_t,
+    num: usize,
 ) -> *const c_char {
     unsafe {
         let mut d = dest.add(tinyrlibc::strlen(dest));
