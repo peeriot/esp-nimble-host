@@ -18,30 +18,42 @@ const NIMBLE_DOWNLOAD_URL: &str =
 /// Directory name inside the extracted tarball.
 const NIMBLE_EXTRACTED_DIR: &str = "mynewt-nimble-nimble_1_9_0_tag";
 
-/// Download and extract the NimBLE source into `out_dir` if not already present.
-/// Returns the path to the extracted NimBLE root.
+/// Extract a pristine NimBLE source tree into `out_dir`, downloading the
+/// tarball on the first build. Returns the path to the extracted NimBLE root.
+///
+/// The tarball is cached in `out_dir`, but the tree is re-extracted on every
+/// run so the patches below always apply to unmodified sources.
 fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
     let nimble_dir = out_dir.join(NIMBLE_EXTRACTED_DIR);
+    let tarball = out_dir.join(format!("{NIMBLE_VERSION}.tar.gz"));
 
-    if nimble_dir.exists() {
-        // Already downloaded and extracted in a previous build.
-        return nimble_dir;
+    if !tarball.exists() {
+        println!(
+            "cargo:warning=Downloading Apache NimBLE ({}) from GitHub...",
+            NIMBLE_VERSION,
+        );
+
+        let response = ureq::get(NIMBLE_DOWNLOAD_URL).call().unwrap_or_else(|e| {
+            panic!("Failed to download NimBLE source from {NIMBLE_DOWNLOAD_URL}: {e}");
+        });
+
+        let body = response
+            .into_body()
+            .read_to_vec()
+            .expect("Failed to read NimBLE tarball");
+
+        // Write under a temporary name so an interrupted build never leaves a
+        // truncated tarball behind as the cache.
+        let partial = tarball.with_extension("partial");
+        fs::write(&partial, body).expect("Failed to write NimBLE tarball");
+        fs::rename(&partial, &tarball).expect("Failed to store NimBLE tarball");
     }
 
-    println!(
-        "cargo:warning=Downloading Apache NimBLE ({}) from GitHub...",
-        NIMBLE_VERSION,
-    );
+    if nimble_dir.exists() {
+        fs::remove_dir_all(&nimble_dir).expect("Failed to remove the previous NimBLE tree");
+    }
 
-    let response = ureq::get(NIMBLE_DOWNLOAD_URL).call().unwrap_or_else(|e| {
-        panic!("Failed to download NimBLE source from {NIMBLE_DOWNLOAD_URL}: {e}");
-    });
-
-    let body = response
-        .into_body()
-        .read_to_vec()
-        .expect("Failed to read NimBLE tarball");
-
+    let body = fs::read(&tarball).expect("Failed to read NimBLE tarball");
     let tar = GzDecoder::new(Cursor::new(body));
     let mut archive = Archive::new(tar);
     archive
@@ -55,6 +67,25 @@ fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
     );
 
     nimble_dir
+}
+
+/// Replace the single occurrence of `needle` in `file` with `replacement`.
+///
+/// Panics unless `needle` occurs exactly once: that is the tripwire for a
+/// NimBLE version bump that moved or duplicated the patched code.
+fn apply_patch(file: &Path, needle: &str, replacement: &str, patch_name: &str) {
+    let name = file.file_name().unwrap().to_string_lossy();
+    let src = fs::read_to_string(file).unwrap_or_else(|e| panic!("Failed to read {name}: {e}"));
+
+    let count = src.matches(needle).count();
+    assert!(
+        count == 1,
+        "Expected the code pattern for the {patch_name} patch exactly once in {name}, \
+         found it {count} times. The NimBLE version may have changed."
+    );
+
+    fs::write(file, src.replacen(needle, replacement, 1))
+        .unwrap_or_else(|e| panic!("Failed to write patched {name}: {e}"));
 }
 
 /// Patch NimBLE's `os_memblock_get` to zero returned memory pool blocks.
@@ -79,7 +110,6 @@ fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
 /// typically 4–16 bytes).
 fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
     let file = nimble_dir.join("porting/nimble/src/os_mempool.c");
-    let src = fs::read_to_string(&file).expect("Failed to read os_mempool.c");
 
     // The original code in os_memblock_get:
     //     if (block) {
@@ -93,19 +123,7 @@ fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
 
     let replacement = "        if (block) {\n            os_mempool_poison_check(mp, block);\n            os_mempool_guard_check(mp, block);\n            /* [esp-nimble-host patch] Zero block so that ble_npl_event.dummy\n             * is 0 after re-allocation from the pool.  See build.rs for the\n             * full rationale (stale free-list pointers vs. ble_npl_event_init). */\n            memset(block, 0, mp->mp_block_size);\n        }";
 
-    if !src.contains(needle) {
-        if src.contains("[esp-nimble-host patch]") {
-            // Already patched in a previous build.
-            return;
-        }
-        panic!(
-            "Could not find the expected code pattern in os_mempool.c to apply \
-             the zero-on-alloc patch. The NimBLE version may have changed."
-        );
-    }
-
-    let patched = src.replace(needle, replacement);
-    fs::write(&file, patched).expect("Failed to write patched os_mempool.c");
+    apply_patch(&file, needle, replacement, "zero-on-alloc");
 }
 
 /// Patch NimBLE's `ble_hs_event_rx_hci_ev` to call `ble_npl_event_deinit`
@@ -136,25 +154,12 @@ fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
 /// To audit: `grep -rn 'os_memblock_put.*ble_hs_hci_ev_pool' nimble/host/src/`
 fn patch_ble_hs_event_deinit_before_pool_put(nimble_dir: &Path) {
     let file = nimble_dir.join("nimble/host/src/ble_hs.c");
-    let src = fs::read_to_string(&file).expect("Failed to read ble_hs.c");
 
     let needle = "    rc = os_memblock_put(&ble_hs_hci_ev_pool, ev);";
 
     let replacement = "    /* [esp-nimble-host patch] Free the heap-allocated Event struct before\n     * returning the block to the pool.  Without this, the Event is leaked\n     * every time the pool recycles a block.  See build.rs for details. */\n    { extern void ble_npl_event_deinit(struct ble_npl_event *ev); ble_npl_event_deinit(ev); }\n    rc = os_memblock_put(&ble_hs_hci_ev_pool, ev);";
 
-    if !src.contains(needle) {
-        if src.contains("ble_npl_event_deinit(ev)") {
-            // Already patched in a previous build.
-            return;
-        }
-        panic!(
-            "Could not find the expected code pattern in ble_hs.c to apply \
-             the event-deinit-before-pool-put patch. The NimBLE version may have changed."
-        );
-    }
-
-    let patched = src.replace(needle, replacement);
-    fs::write(&file, patched).expect("Failed to write patched ble_hs.c");
+    apply_patch(&file, needle, replacement, "event-deinit-before-pool-put");
 }
 
 /// Patch NimBLE's `ble_gattc_disc_all_chrs_rx_complete` off-by-one that drops
@@ -177,31 +182,22 @@ fn patch_ble_hs_event_deinit_before_pool_put(nimble_dir: &Path) {
 /// present as of `nimble_1_9_0_tag` and current `master`.
 fn patch_ble_gattc_disc_all_chrs_last_char(nimble_dir: &Path) {
     let file = nimble_dir.join("nimble/host/src/ble_gattc.c");
-    let src = fs::read_to_string(&file).expect("Failed to read ble_gattc.c");
 
     let needle = "    if (proc->disc_all_chrs.prev_handle + 1 >= proc->disc_all_chrs.end_handle - 1) {";
 
     let replacement = "    /* [esp-nimble-host patch] Off-by-one: compare against end_handle, not\n     * end_handle - 1, or the service's last characteristic is dropped when\n     * it occupies the final two handles. See build.rs for details. */\n    if (proc->disc_all_chrs.prev_handle + 1 >= proc->disc_all_chrs.end_handle) {";
 
-    if !src.contains(needle) {
-        if src.contains("[esp-nimble-host patch] Off-by-one") {
-            // Already patched in a previous build.
-            return;
-        }
-        panic!(
-            "Could not find the expected code pattern in ble_gattc.c to apply \
-             the disc-all-chrs off-by-one patch. The NimBLE version may have changed."
-        );
-    }
-
-    let patched = src.replace(needle, replacement);
-    fs::write(&file, patched).expect("Failed to write patched ble_gattc.c");
+    apply_patch(&file, needle, replacement, "disc-all-chrs off-by-one");
 }
 
 // ── nimble-config.toml schema ─────────────────────────────────────────────────
+//
+// There are no Rust-side defaults: the bundled `nimble-config.toml` is the
+// single source of them and must set every key, so a key missing from it is a
+// build error rather than a silently diverging default.
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NimbleConfig {
     roles: RolesConfig,
     connections: ConnectionsConfig,
@@ -214,7 +210,7 @@ struct NimbleConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct RolesConfig {
     central: bool,
     observer: bool,
@@ -222,31 +218,14 @@ struct RolesConfig {
     broadcaster: bool,
 }
 
-impl Default for RolesConfig {
-    fn default() -> Self {
-        Self {
-            central: true,
-            observer: true,
-            peripheral: false,
-            broadcaster: false,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct ConnectionsConfig {
     max_connections: u16,
 }
 
-impl Default for ConnectionsConfig {
-    fn default() -> Self {
-        Self { max_connections: 1 }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct TransportConfig {
     acl_count: u16,
     acl_size: u16,
@@ -255,36 +234,15 @@ struct TransportConfig {
     evt_size: u16,
 }
 
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self {
-            acl_count: 6,
-            acl_size: 251,
-            evt_count: 4,
-            evt_discardable_count: 8,
-            evt_size: 70,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct MsysConfig {
     block_count: u16,
     block_size: u16,
 }
 
-impl Default for MsysConfig {
-    fn default() -> Self {
-        Self {
-            block_count: 8,
-            block_size: 292,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct GattConfig {
     preferred_mtu: u16,
     max_procs: u16,
@@ -292,51 +250,22 @@ struct GattConfig {
     resume_rate_ms: u16,
 }
 
-impl Default for GattConfig {
-    fn default() -> Self {
-        Self {
-            preferred_mtu: 128,
-            max_procs: 4,
-            max_prep_entries: 0,
-            resume_rate_ms: 1000,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct L2capConfig {
     max_channels: u16,
     max_sig_procs: u16,
 }
 
-impl Default for L2capConfig {
-    fn default() -> Self {
-        Self {
-            max_channels: 0,
-            max_sig_procs: 1,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct StorageConfig {
     max_bonds: u16,
     max_cccds: u16,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            max_bonds: 3,
-            max_cccds: 8,
-        }
-    }
-}
-
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct SecurityConfig {
     legacy: bool,
     sc: bool,
@@ -345,62 +274,107 @@ struct SecurityConfig {
     max_procs: u16,
 }
 
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            legacy: false,
-            sc: false,
-            mitm: false,
-            bonding: false,
-            max_procs: 1,
-        }
-    }
-}
-
-/// Load nimble-config.toml from the consuming project, or fall back to defaults.
+/// Load the NimBLE configuration from two layers:
+///   1. This crate's own `nimble-config.toml`, read from `CARGO_MANIFEST_DIR`.
+///      It holds the defaults and must set every key.
+///   2. The consuming project's `nimble-config.toml`, read from the directory
+///      named by `NIMBLE_CONFIG_DIR` (set in the project's `.cargo/config.toml`
+///      `[env]` table). It is merged over the first key by key, so it only
+///      needs the values it changes.
 ///
-/// Search order:
-///   1. `NIMBLE_CONFIG_DIR` env var — set this in `.cargo/config.toml` of the
-///      consuming crate for full control over the path (e.g. in a deep workspace).
-///   2. Workspace root (`CARGO_WORKSPACE_DIR`) — works automatically when the
-///      consuming crate places `nimble-config.toml` at its workspace root.
-///   3. `CARGO_MANIFEST_DIR` — this crate's own root; used when building the
-///      library directly (e.g. `cargo clippy` in the repo) where
-///      `CARGO_WORKSPACE_DIR` may not be set.
-///   4. Built-in defaults — when none of the above yields a file.
+/// `NIMBLE_CONFIG_DIR` must be an absolute path to a directory containing a
+/// `nimble-config.toml`, otherwise the build fails. A relative path would be
+/// resolved against this crate's checkout rather than the consuming project,
+/// and a missing file would be ignored without notice: cargo only reruns this
+/// script for files that existed when it last ran. An empty value counts as
+/// unset.
 fn load_config() -> NimbleConfig {
-    // Tell cargo to re-run if the override var changes.
     println!("cargo:rerun-if-env-changed=NIMBLE_CONFIG_DIR");
 
-    let search_paths: Vec<PathBuf> = [
-        std::env::var("NIMBLE_CONFIG_DIR").ok().map(PathBuf::from),
-        std::env::var("CARGO_WORKSPACE_DIR").ok().map(PathBuf::from),
-        // CARGO_MANIFEST_DIR points to this crate's root — useful when building
-        // the library directly (e.g. `cargo clippy` in the repo) where
-        // CARGO_WORKSPACE_DIR may not be set.
-        std::env::var("CARGO_MANIFEST_DIR").ok().map(PathBuf::from),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let bundled_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("nimble-config.toml");
+    println!("cargo:rerun-if-changed={}", bundled_path.display());
+    let mut config = read_config_table(&bundled_path);
 
-    for dir in &search_paths {
-        let config_path = dir.join("nimble-config.toml");
-        if config_path.exists() {
-            println!("cargo:rerun-if-changed={}", config_path.display());
-            println!(
-                "cargo:warning=Using NimBLE config from: {}",
-                config_path.display()
+    // Validate the bundled file on its own first, so it really does set every
+    // key and its errors are not blamed on the project file below.
+    let _: NimbleConfig = config.clone().try_into().unwrap_or_else(|e| {
+        panic!(
+            "Invalid bundled NimBLE configuration in {}: {e}",
+            bundled_path.display()
+        )
+    });
+
+    let override_path = match std::env::var_os("NIMBLE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            assert!(
+                dir.is_absolute(),
+                "NIMBLE_CONFIG_DIR must be an absolute path, got `{}`. In .cargo/config.toml, \
+                 set it with `relative = true` to resolve it against the project",
+                dir.display()
             );
-            let content = fs::read_to_string(&config_path)
-                .unwrap_or_else(|e| panic!("Failed to read {}: {e}", config_path.display()));
-            return toml::from_str(&content)
-                .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", config_path.display()));
+            let path = dir.join("nimble-config.toml");
+            assert!(
+                path.is_file(),
+                "NIMBLE_CONFIG_DIR is set, but {} does not exist. Create it with the \
+                 settings to change, or unset NIMBLE_CONFIG_DIR to use the bundled defaults",
+                path.display()
+            );
+            println!("cargo:rerun-if-changed={}", path.display());
+            println!(
+                "cargo:warning=Using NimBLE config from: {} (over the bundled defaults)",
+                path.display()
+            );
+            merge_tables(&mut config, read_config_table(&path));
+            Some(path)
+        }
+        None => {
+            println!("cargo:warning=Using the bundled NimBLE config");
+            None
+        }
+    };
+
+    // The bundled file is valid on its own, so any error left is in the
+    // project file.
+    let source = override_path.as_deref().unwrap_or(&bundled_path);
+    let config: NimbleConfig = config
+        .try_into()
+        .unwrap_or_else(|e| panic!("Invalid NimBLE configuration in {}: {e}", source.display()));
+
+    // The controller is configured with the same limit (see `controller_config`
+    // in lib.rs) and rejects values outside this range at start-up. 70 is the
+    // limit esp-radio enforces on every chip this crate supports (C5, C6, C61).
+    let max_connections = config.connections.max_connections;
+    assert!(
+        (1..=70).contains(&max_connections),
+        "Invalid NimBLE configuration: connections.max_connections must be 1-70, got {max_connections}"
+    );
+
+    config
+}
+
+/// Parse a `nimble-config.toml` into an untyped table, so layers can be merged
+/// key by key before deserializing.
+fn read_config_table(path: &Path) -> toml::Table {
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+
+    toml::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
+}
+
+/// Overlay `overlay` onto `base`: nested tables merge recursively, any other
+/// value in `overlay` replaces the one in `base`.
+fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(base_table)), toml::Value::Table(overlay_table)) => {
+                merge_tables(base_table, overlay_table);
+            }
+            (_, value) => {
+                base.insert(key, value);
+            }
         }
     }
-
-    println!("cargo:warning=No nimble-config.toml found, using built-in defaults");
-    NimbleConfig::default()
 }
 
 /// Generate a C header that overrides NimBLE's syscfg defaults.
@@ -637,9 +611,17 @@ fn main() {
 
     // Load nimble-config.toml and generate C override header.
     let config = load_config();
+
+    // NimBLE compiles its security manager in when either pairing method is on
+    // (`NIMBLE_BLE_SM` in nimble_opt_auto.h); the Rust side follows it.
+    let security_manager = config.security.legacy || config.security.sc;
+    println!("cargo::rustc-check-cfg=cfg(nimble_sm)");
+    if security_manager {
+        println!("cargo::rustc-cfg=nimble_sm");
+    }
     let override_header = generate_syscfg_override(&config, &out_dir);
 
-    // Download NimBLE source (cached in OUT_DIR between incremental builds).
+    // Extract a pristine NimBLE tree (the tarball is cached in OUT_DIR).
     let nimble_dir = ensure_nimble_source(&out_dir);
 
     // Patch os_memblock_get to zero returned blocks (see doc comment for rationale).
@@ -668,7 +650,7 @@ fn main() {
         nimble_dir.join("nimble/transport/include"),
     ];
 
-    if config.security.legacy || config.security.sc {
+    if security_manager {
         include_dirs.push(nimble_dir.join("ext/tinycrypt/include"));
     }
 
@@ -732,10 +714,20 @@ fn main() {
         .file(nimble_dir.join("nimble/transport/src/transport.c"))
         .includes(&include_dirs);
 
-    if config.security.legacy || config.security.sc {
+    if security_manager {
         cc_build
             .file(nimble_dir.join("ext/tinycrypt/src/aes_encrypt.c"))
             .file(nimble_dir.join("ext/tinycrypt/src/utils.c"));
+    }
+
+    if config.security.sc {
+        // AES-CMAC and P-256 ECDH for Secure Connections. NimBLE installs its
+        // own RNG with `uECC_set_rng`, so the platform RNG in
+        // ecc_platform_specific.c is not needed.
+        cc_build
+            .file(nimble_dir.join("ext/tinycrypt/src/cmac_mode.c"))
+            .file(nimble_dir.join("ext/tinycrypt/src/ecc.c"))
+            .file(nimble_dir.join("ext/tinycrypt/src/ecc_dh.c"));
     }
 
     // Cross-compile for bare-metal RISC-V
