@@ -18,30 +18,42 @@ const NIMBLE_DOWNLOAD_URL: &str =
 /// Directory name inside the extracted tarball.
 const NIMBLE_EXTRACTED_DIR: &str = "mynewt-nimble-nimble_1_9_0_tag";
 
-/// Download and extract the NimBLE source into `out_dir` if not already present.
-/// Returns the path to the extracted NimBLE root.
+/// Extract a pristine NimBLE source tree into `out_dir`, downloading the
+/// tarball on the first build. Returns the path to the extracted NimBLE root.
+///
+/// The tarball is cached in `out_dir`, but the tree is re-extracted on every
+/// run so the patches below always apply to unmodified sources.
 fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
     let nimble_dir = out_dir.join(NIMBLE_EXTRACTED_DIR);
+    let tarball = out_dir.join(format!("{NIMBLE_VERSION}.tar.gz"));
 
-    if nimble_dir.exists() {
-        // Already downloaded and extracted in a previous build.
-        return nimble_dir;
+    if !tarball.exists() {
+        println!(
+            "cargo:warning=Downloading Apache NimBLE ({}) from GitHub...",
+            NIMBLE_VERSION,
+        );
+
+        let response = ureq::get(NIMBLE_DOWNLOAD_URL).call().unwrap_or_else(|e| {
+            panic!("Failed to download NimBLE source from {NIMBLE_DOWNLOAD_URL}: {e}");
+        });
+
+        let body = response
+            .into_body()
+            .read_to_vec()
+            .expect("Failed to read NimBLE tarball");
+
+        // Write under a temporary name so an interrupted build never leaves a
+        // truncated tarball behind as the cache.
+        let partial = tarball.with_extension("partial");
+        fs::write(&partial, body).expect("Failed to write NimBLE tarball");
+        fs::rename(&partial, &tarball).expect("Failed to store NimBLE tarball");
     }
 
-    println!(
-        "cargo:warning=Downloading Apache NimBLE ({}) from GitHub...",
-        NIMBLE_VERSION,
-    );
+    if nimble_dir.exists() {
+        fs::remove_dir_all(&nimble_dir).expect("Failed to remove the previous NimBLE tree");
+    }
 
-    let response = ureq::get(NIMBLE_DOWNLOAD_URL).call().unwrap_or_else(|e| {
-        panic!("Failed to download NimBLE source from {NIMBLE_DOWNLOAD_URL}: {e}");
-    });
-
-    let body = response
-        .into_body()
-        .read_to_vec()
-        .expect("Failed to read NimBLE tarball");
-
+    let body = fs::read(&tarball).expect("Failed to read NimBLE tarball");
     let tar = GzDecoder::new(Cursor::new(body));
     let mut archive = Archive::new(tar);
     archive
@@ -55,6 +67,25 @@ fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
     );
 
     nimble_dir
+}
+
+/// Replace the single occurrence of `needle` in `file` with `replacement`.
+///
+/// Panics unless `needle` occurs exactly once: that is the tripwire for a
+/// NimBLE version bump that moved or duplicated the patched code.
+fn apply_patch(file: &Path, needle: &str, replacement: &str, patch_name: &str) {
+    let name = file.file_name().unwrap().to_string_lossy();
+    let src = fs::read_to_string(file).unwrap_or_else(|e| panic!("Failed to read {name}: {e}"));
+
+    let count = src.matches(needle).count();
+    assert!(
+        count == 1,
+        "Expected the code pattern for the {patch_name} patch exactly once in {name}, \
+         found it {count} times. The NimBLE version may have changed."
+    );
+
+    fs::write(file, src.replacen(needle, replacement, 1))
+        .unwrap_or_else(|e| panic!("Failed to write patched {name}: {e}"));
 }
 
 /// Patch NimBLE's `os_memblock_get` to zero returned memory pool blocks.
@@ -79,7 +110,6 @@ fn ensure_nimble_source(out_dir: &Path) -> PathBuf {
 /// typically 4–16 bytes).
 fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
     let file = nimble_dir.join("porting/nimble/src/os_mempool.c");
-    let src = fs::read_to_string(&file).expect("Failed to read os_mempool.c");
 
     // The original code in os_memblock_get:
     //     if (block) {
@@ -93,19 +123,7 @@ fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
 
     let replacement = "        if (block) {\n            os_mempool_poison_check(mp, block);\n            os_mempool_guard_check(mp, block);\n            /* [esp-nimble-host patch] Zero block so that ble_npl_event.dummy\n             * is 0 after re-allocation from the pool.  See build.rs for the\n             * full rationale (stale free-list pointers vs. ble_npl_event_init). */\n            memset(block, 0, mp->mp_block_size);\n        }";
 
-    if !src.contains(needle) {
-        if src.contains("[esp-nimble-host patch]") {
-            // Already patched in a previous build.
-            return;
-        }
-        panic!(
-            "Could not find the expected code pattern in os_mempool.c to apply \
-             the zero-on-alloc patch. The NimBLE version may have changed."
-        );
-    }
-
-    let patched = src.replace(needle, replacement);
-    fs::write(&file, patched).expect("Failed to write patched os_mempool.c");
+    apply_patch(&file, needle, replacement, "zero-on-alloc");
 }
 
 /// Patch NimBLE's `ble_hs_event_rx_hci_ev` to call `ble_npl_event_deinit`
@@ -136,25 +154,12 @@ fn patch_os_mempool_zero_on_alloc(nimble_dir: &Path) {
 /// To audit: `grep -rn 'os_memblock_put.*ble_hs_hci_ev_pool' nimble/host/src/`
 fn patch_ble_hs_event_deinit_before_pool_put(nimble_dir: &Path) {
     let file = nimble_dir.join("nimble/host/src/ble_hs.c");
-    let src = fs::read_to_string(&file).expect("Failed to read ble_hs.c");
 
     let needle = "    rc = os_memblock_put(&ble_hs_hci_ev_pool, ev);";
 
     let replacement = "    /* [esp-nimble-host patch] Free the heap-allocated Event struct before\n     * returning the block to the pool.  Without this, the Event is leaked\n     * every time the pool recycles a block.  See build.rs for details. */\n    { extern void ble_npl_event_deinit(struct ble_npl_event *ev); ble_npl_event_deinit(ev); }\n    rc = os_memblock_put(&ble_hs_hci_ev_pool, ev);";
 
-    if !src.contains(needle) {
-        if src.contains("ble_npl_event_deinit(ev)") {
-            // Already patched in a previous build.
-            return;
-        }
-        panic!(
-            "Could not find the expected code pattern in ble_hs.c to apply \
-             the event-deinit-before-pool-put patch. The NimBLE version may have changed."
-        );
-    }
-
-    let patched = src.replace(needle, replacement);
-    fs::write(&file, patched).expect("Failed to write patched ble_hs.c");
+    apply_patch(&file, needle, replacement, "event-deinit-before-pool-put");
 }
 
 /// Patch NimBLE's `ble_gattc_disc_all_chrs_rx_complete` off-by-one that drops
@@ -177,25 +182,12 @@ fn patch_ble_hs_event_deinit_before_pool_put(nimble_dir: &Path) {
 /// present as of `nimble_1_9_0_tag` and current `master`.
 fn patch_ble_gattc_disc_all_chrs_last_char(nimble_dir: &Path) {
     let file = nimble_dir.join("nimble/host/src/ble_gattc.c");
-    let src = fs::read_to_string(&file).expect("Failed to read ble_gattc.c");
 
     let needle = "    if (proc->disc_all_chrs.prev_handle + 1 >= proc->disc_all_chrs.end_handle - 1) {";
 
     let replacement = "    /* [esp-nimble-host patch] Off-by-one: compare against end_handle, not\n     * end_handle - 1, or the service's last characteristic is dropped when\n     * it occupies the final two handles. See build.rs for details. */\n    if (proc->disc_all_chrs.prev_handle + 1 >= proc->disc_all_chrs.end_handle) {";
 
-    if !src.contains(needle) {
-        if src.contains("[esp-nimble-host patch] Off-by-one") {
-            // Already patched in a previous build.
-            return;
-        }
-        panic!(
-            "Could not find the expected code pattern in ble_gattc.c to apply \
-             the disc-all-chrs off-by-one patch. The NimBLE version may have changed."
-        );
-    }
-
-    let patched = src.replace(needle, replacement);
-    fs::write(&file, patched).expect("Failed to write patched ble_gattc.c");
+    apply_patch(&file, needle, replacement, "disc-all-chrs off-by-one");
 }
 
 // ── nimble-config.toml schema ─────────────────────────────────────────────────
@@ -303,6 +295,15 @@ fn load_config() -> NimbleConfig {
     println!("cargo:rerun-if-changed={}", bundled_path.display());
     let mut config = read_config_table(&bundled_path);
 
+    // Validate the bundled file on its own first, so it really does set every
+    // key and its errors are not blamed on the project file below.
+    let _: NimbleConfig = config.clone().try_into().unwrap_or_else(|e| {
+        panic!(
+            "Invalid bundled NimBLE configuration in {}: {e}",
+            bundled_path.display()
+        )
+    });
+
     let override_path = match std::env::var_os("NIMBLE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
         Some(dir) => {
             let dir = PathBuf::from(dir);
@@ -333,8 +334,8 @@ fn load_config() -> NimbleConfig {
         }
     };
 
-    // Errors name the project file when there is one, since it is almost
-    // always the one at fault.
+    // The bundled file is valid on its own, so any error left is in the
+    // project file.
     let source = override_path.as_deref().unwrap_or(&bundled_path);
     let config: NimbleConfig = config
         .try_into()
@@ -620,7 +621,7 @@ fn main() {
     }
     let override_header = generate_syscfg_override(&config, &out_dir);
 
-    // Download NimBLE source (cached in OUT_DIR between incremental builds).
+    // Extract a pristine NimBLE tree (the tarball is cached in OUT_DIR).
     let nimble_dir = ensure_nimble_source(&out_dir);
 
     // Patch os_memblock_get to zero returned blocks (see doc comment for rationale).
