@@ -25,7 +25,6 @@
 //! | [`Scanner`] | BLE advertisement scanner. Subscribe with [`Scanner::subscribe`] to receive [`RawAdvertisement`]s; convert with [`TryFrom`] to get parsed [`Advertisement`] fields. |
 //! | [`peripheral::Peripheral`] | Handle to a remote BLE peripheral — connect, discover, read/write attributes, subscribe to notifications. |
 #![no_std]
-#![feature(c_size_t)]
 
 extern crate alloc;
 
